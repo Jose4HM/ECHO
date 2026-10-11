@@ -1,92 +1,84 @@
-function [iq_out, Fs] = frontend_dsp(iq_in,cfg)
-%% ==========================================================
-% 1. ELIMINAR DC
-% ===========================================================
+function [iq_out, Fs] = frontend_dsp(iq_in, cfg)
+%FRONTEND_DSP Low-IF to baseband frontend for vital-sign radar.
+%   Input is raw complex IQ from cw.m. Output is complex baseband IQ at
+%   4 kHz, ready for procesar_signos_vitales_v3.
 
-iq = iq_in - mean(iq_in);
+if nargin < 2 || ~isstruct(cfg)
+    error('cfg debe ser una estructura valida.');
+end
+if ~isfield(cfg, 'fs') || ~isfield(cfg, 'tx_tone_hz')
+    error('cfg debe contener fs y tx_tone_hz.');
+end
 
 Fs = cfg.fs;
+if ~isscalar(Fs) || ~isfinite(Fs) || Fs <= 0
+    error('cfg.fs debe ser un escalar positivo en Hz.');
+end
 
-%% ==========================================================
-% 2. FFT DE DIAGNÓSTICO
-% ===========================================================
+iq = iq_in(:);
+if isempty(iq)
+    error('iq_in esta vacio.');
+end
 
-Nfft = min(65536,length(iq));
+if any(~isfinite(iq))
+    n_bad = sum(~isfinite(iq));
+    warning('iq_in contiene %d muestras no finitas; se interpolaran.', n_bad);
+    idx_good = isfinite(iq);
+    if sum(idx_good) < 2
+        error('iq_in no tiene suficientes muestras finitas.');
+    end
+    idx_all = (1:numel(iq)).';
+    iq = interp1(idx_all(idx_good), iq(idx_good), idx_all, 'linear', 'extrap');
+end
 
-X = fftshift(fft(iq(1:Nfft)));
+debug_plots = isfield(cfg, 'debug_plots') && logical(cfg.debug_plots);
 
-f = (-Nfft/2:Nfft/2-1)*(Fs/Nfft);
+iq = iq - mean(iq);
 
-figure
-plot(f/1000,20*log10(abs(X)+1e-12))
-grid on
+if debug_plots
+    plot_spectrum(iq, Fs, 65536, 'Frontend v3 - FFT antes de mezclar', 'kHz', 1e3);
+end
 
-xlabel('kHz')
-ylabel('dB')
+% Mezcla Low-IF a banda base.
+n = (0:numel(iq)-1).';
+iq = iq .* exp(-1j * 2*pi * cfg.tx_tone_hz * n / Fs);
 
-title('Frontend - FFT antes de mezclar')
+% 1 MHz -> 20 kHz. El LPF conserva margen amplio alrededor de banda base.
+iq = lowpass_fir_zero_phase(iq, Fs, 20000, 128);
+iq = decimate(iq, 50);
+Fs = Fs / 50;
 
-%% ==========================================================
-% 3. MEZCLA A BANDA BASE
-% ===========================================================
+% 20 kHz -> 4 kHz. La banda de interes fisiologica queda muy por debajo
+% de 100 Hz, pero se conserva margen para diagnostico y filtrado posterior.
+iq = lowpass_fir_zero_phase(iq, Fs, 100, 128);
+iq = decimate(iq, 5);
+Fs = Fs / 5;
 
-n = (0:length(iq)-1).';
+iq = iq - mean(iq);
 
-iq = iq .* exp(-1j*2*pi*cfg.tx_tone_hz*n/Fs);
+if debug_plots
+    plot_spectrum(iq, Fs, 8192, 'Frontend v3 - FFT salida', 'Hz', 1);
+end
 
-%% ==========================================================
-% 4. LPF
-% ===========================================================
+iq_out = iq(:);
+end
 
-fc = 20000;
+function y = lowpass_fir_zero_phase(x, Fs, fc, order)
+if fc >= Fs/2
+    error('fc=%.3f Hz debe ser menor que Nyquist=%.3f Hz.', fc, Fs/2);
+end
+b = fir1(order, fc / (Fs/2));
+y = filtfilt(b, 1, x);
+end
 
-N = 128;
-
-b = fir1(N,fc/(Fs/2));
-
-iq = filtfilt(b,1,iq);
-
-%% ==========================================================
-% 5. DECIMACIÓN (1MHz a 20Khz)
-% ===========================================================
-
-R1 = 50;
-
-iq = decimate(iq,R1);
-
-Fs = Fs/R1;
-
-fc = 200;
-
-N = 128;
-
-%% ==========================================================
-% 5.1 DECIMACIÓN (20Khz a 1000 Hz)
-% ===========================================================
-
-b = fir1(N,fc/(Fs/2));
-
-iq = filtfilt(b,1,iq);
-
-R2 = 20;
-
-iq = decimate(iq,R2);
-
-Fs = Fs/R2;
-
-Nfft = min(8192,length(iq));
-
-X = fftshift(fft(iq(1:Nfft)));
-
-f = (-Nfft/2:Nfft/2-1)*(Fs/Nfft);
-
-figure
-plot(f,20*log10(abs(X)+1e-12))
-grid on
-
-xlabel('Hz')
-ylabel('dB')
-
-title('Frontend - FFT salida')
-
-iq_out = iq;
+function plot_spectrum(x, Fs, nfft_max, ttl, unit_label, unit_scale)
+Nfft = min(nfft_max, numel(x));
+X = fftshift(fft(x(1:Nfft)));
+f = (-Nfft/2:Nfft/2-1) * (Fs / Nfft);
+figure;
+plot(f / unit_scale, 20*log10(abs(X) + 1e-12));
+grid on;
+xlabel(unit_label);
+ylabel('dB');
+title(ttl);
+end

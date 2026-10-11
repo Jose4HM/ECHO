@@ -18,9 +18,10 @@ cfg.tx_gain = -45;           % dB
 cfg.rx_gain = -5;            % dB 
 cfg.rx_agc = 'manual';
 
-cfg.block_len = 10000;       
-% Tiempo de captura (cfg.block_len*cfg.num_blocks)/cfg.fs
-cfg.num_blocks = 2000;         % Aumentado para tener ~1.6 segundos de datos continuos
+cfg.block_len = 10000;
+cfg.capture_seconds = 40;
+cfg.num_blocks = ceil(cfg.capture_seconds * cfg.fs / cfg.block_len);
+cfg.capture_seconds = (cfg.block_len * cfg.num_blocks) / cfg.fs;
 cfg.num_buffers = 32;
 cfg.buffer_size = 30720;
 cfg.num_transfers = 8;
@@ -40,7 +41,7 @@ end
 
 fprintf('Abriendo bladeRF...\n');
 b = bladeRF(['*:serial=' cfg.serial]);
-% cleanup_obj = onCleanup(@() cleanup_bladerf(b));
+cleanup_obj = onCleanup(@() cleanup_bladerf(b, cfg));
 
 configure_bladerf(b, cfg);
 
@@ -60,9 +61,9 @@ fprintf('Esperando estabilización de osciladores a 5.8 GHz (Cold Start)...\n');
 pause(1.0); 
 
 % Ahora sí, encender y alimentar el hardware inmediatamente sin pausas
-fprintf('Iniciando TX %s y RX %s...\n', cfg.tx_channel, cfg.rx_channel);
-b.tx.start();
+fprintf('Iniciando RX %s y TX %s...\n', cfg.rx_channel, cfg.tx_channel);
 b.rx.start();
+b.tx.start();
 
 fprintf('Limpiando buffers USB...\n');
 % 2. Descartar bloques iniciales (Warm-up de buffers)
@@ -161,7 +162,6 @@ cfg.saturation = porcentaje;
 
 % Limpieza final
 clear cleanup_obj;
-cleanup_bladerf(b);
 fprintf('Captura finalizada.\n');
 
 % =========================================================================
@@ -191,7 +191,11 @@ function configure_bladerf(b, cfg)
     b.rx.channel = cfg.rx_channel;
 end
 
-function cleanup_bladerf(b)
+function cleanup_bladerf(b, cfg)
+    try
+        b.transmit(complex(zeros(cfg.block_len, 1)), cfg.timeout_ms, 0, false, true);
+    catch
+    end
     try b.tx.stop(); catch, end
     pause(0.05);
     try b.rx.stop(); catch, end
