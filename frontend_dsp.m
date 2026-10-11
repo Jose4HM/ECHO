@@ -43,22 +43,15 @@ end
 n = (0:numel(iq)-1).';
 iq = iq .* exp(-1j * 2*pi * cfg.tx_tone_hz * n / Fs);
 
-% 1 MHz -> 100 kHz. Primera etapa de decimacion: deja margen amplio y
-% evita pedir un filtro irrealmente angosto antes de bajar a 20 kHz.
-iq = lowpass_fir_zero_phase(iq, Fs, 40000, 256);
-iq = downsample(iq, 10);
-Fs = Fs / 10;
-
-% 100 kHz -> 20 kHz. Antes de decimar x5, Nyquist final sera 10 kHz;
-% por eso el corte debe quedar por debajo, no en 20 kHz.
-iq = lowpass_fir_zero_phase(iq, Fs, 8000, 256);
-iq = downsample(iq, 5);
-Fs = Fs / 5;
+% 1 MHz -> 20 kHz. El LPF conserva margen amplio alrededor de banda base.
+iq = lowpass_fir_zero_phase(iq, Fs, 20000, 128);
+iq = decimate(iq, 50);
+Fs = Fs / 50;
 
 % 20 kHz -> 4 kHz. La banda de interes fisiologica queda muy por debajo
 % de 100 Hz, pero se conserva margen para diagnostico y filtrado posterior.
-iq = lowpass_fir_zero_phase(iq, Fs, 100, 256);
-iq = downsample(iq, 5);
+iq = lowpass_fir_zero_phase(iq, Fs, 100, 128);
+iq = decimate(iq, 5);
 Fs = Fs / 5;
 
 iq = iq - mean(iq);

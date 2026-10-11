@@ -10,12 +10,13 @@ cfg.fc = 5.8e9;              % Frecuencia portadora (Hz)
 cfg.fs = 1e6;                % Tasa de muestreo (Sa/s)
 cfg.bandwidth = 1e6;         % Ancho de banda (Hz)
 cfg.tx_tone_hz = 100e3;      % Tono Low-IF para evitar ruido 1/f
-cfg.tx_amplitude = 0.07;     % Amplitud (0 - 0.5)
+cfg.tx_amplitude = 0.15;     % Amplitud (0 - 0.5)
 
 cfg.tx_channel = 'TX1';
 cfg.rx_channel = 'RX2';      
 cfg.tx_gain = -45;           % dB
-cfg.rx_gain = -15;            % dB 
+cfg.rx_gain = -15;           % dB (bajado de -5: el pico por bloque estaba
+                              % pegado a 1.0 en toda la captura de 40s)
 cfg.rx_agc = 'manual';
 
 cfg.block_len = 10000;
@@ -48,6 +49,12 @@ configure_bladerf(b, cfg);
 total_samples = cfg.block_len * cfg.num_blocks;
 rx_continuous = complex(zeros(total_samples, 1)); 
 actual_counts = zeros(cfg.num_blocks, 1);
+% Envolvente de amplitud por bloque, para diagnosticar la captura completa
+% (no solo los primeros ms). Se llenan en el loop principal, un valor por
+% cada intento de transmit+receive, independientemente de si el bloque
+% resulto completo o no.
+block_peak = zeros(cfg.num_blocks, 1);
+block_rms  = zeros(cfg.num_blocks, 1);
 % --- CÓDIGO CORREGIDO ---
 %% Generar bloque TX primero, en la tranquilidad de la RAM
 n = (0:cfg.block_len-1).';
@@ -68,7 +75,7 @@ b.tx.start();
 fprintf('Limpiando buffers USB...\n');
 % 2. Descartar bloques iniciales (Warm-up de buffers)
 for k = 1:30
-    b.transmit(tx_block);
+    b.transmit(tx_block, cfg.timeout_ms, 0, false, false);
     [~, ~, ~, ov_warmup] = b.receive(cfg.block_len);
     if ov_warmup
         warning('Overrun durante warm-up en iteración %d', k);
@@ -86,14 +93,21 @@ idx = 1;
 
 try
     for k = 1:cfg.num_blocks
-        % transmit() sin flags SOB/EOB evita cerrar el burst en cada
-        % bloque, reduciendo discontinuidades periodicas en fase.
-        b.transmit(tx_block);
+        b.transmit(tx_block, cfg.timeout_ms, 0, false, false);
         [rx, ~, actual_count, overrun] = b.receive(cfg.block_len);
 
 
         actual_counts(k) = actual_count;
         total_overruns = total_overruns + overrun;
+
+        % Envolvente real de este bloque, tal como llego del hardware.
+        % Se calcula ANTES de cualquier recorte, para que un bloque corto
+        % o vacio quede reflejado como pico/RMS bajo (no como NaN u
+        % omision silenciosa).
+        if actual_count > 0
+            block_peak(k) = max(abs(rx(1:actual_count)));
+            block_rms(k)  = sqrt(mean(abs(rx(1:actual_count)).^2));
+        end
 
         % Verificar cantidad recibida
         if actual_count ~= cfg.block_len
@@ -115,11 +129,28 @@ catch ME
 
 end
 
-% Detener transmisión de forma segura
-if idx <= total_samples
-    rx_continuous = rx_continuous(1:idx-1);
+% Recortar el buffer al total de muestras REALMENTE recibidas. Si algun
+% bloque salio incompleto, el resto del buffer preasignado se habria
+% quedado en ceros literales al final del vector -- eso diluye el
+% reporte de saturacion (divide entre una longitud inflada) y descuadra
+% el eje de tiempo asumido (Fs constante) frente al tiempo real
+% transcurrido, sin avisar en ningun lado.
+total_actual = idx - 1;
+n_incomplete = nnz(actual_counts ~= cfg.block_len);
+fprintf('\n--- REPORTE DE BLOQUES TX/RX ---\n');
+fprintf('Bloques incompletos: %d de %d (%.2f%%).\n', ...
+    n_incomplete, cfg.num_blocks, 100*n_incomplete/cfg.num_blocks);
+fprintf('Muestras reales capturadas: %d de %d nominales (%.2f%%).\n', ...
+    total_actual, total_samples, 100*total_actual/total_samples);
+if total_actual < total_samples
+    warning(['rx_continuous se recorto a %d muestras (de %d nominales) por ' ...
+        'bloques incompletos. El eje de tiempo asumido a Fs=%.0f Hz ya NO ' ...
+        'corresponde exactamente a los %.1f s nominales de principio a fin.'], ...
+        total_actual, total_samples, cfg.fs, cfg.capture_seconds);
 end
+rx_continuous = rx_continuous(1:max(total_actual, 1));
 
+% Detener transmisión de forma segura
 b.transmit(complex(zeros(cfg.block_len, 1)), cfg.timeout_ms, 0, false, true);
 
 
@@ -165,6 +196,11 @@ rx_continuous = rx_continuous - mean(rx_continuous);
 
 cfg.overruns = total_overruns;
 cfg.saturation = porcentaje;
+cfg.actual_counts = actual_counts;
+cfg.block_peak = block_peak;
+cfg.block_rms = block_rms;
+cfg.n_incomplete_blocks = n_incomplete;
+cfg.total_actual_samples = total_actual;
 
 % Limpieza final
 clear cleanup_obj;

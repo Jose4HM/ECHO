@@ -1,4 +1,4 @@
-    % =========================================================================
+% =========================================================================
 % MASTER SCRIPT: RADAR DE SIGNOS VITALES
 % =========================================================================
 clear; clc; close all;
@@ -58,12 +58,13 @@ elseif vital_info.hr_low_confidence
 end
 
 % --- PASO 5: GRAFICAS DE DIAGNOSTICO ---
-plot_diagnostico_radar(rx_continuous, cfg.fs, iq_frontend, Fs_frontend, ...
+plot_diagnostico_radar(rx_continuous, cfg, iq_frontend, Fs_frontend, ...
     dHP, dLP_rr, rpm, bpm);
 
-function plot_diagnostico_radar(rx_raw, Fs_raw, iq_bb, Fs_bb, dHP, dLP_rr, rpm, bpm)
+function plot_diagnostico_radar(rx_raw, cfg, iq_bb, Fs_bb, dHP, dLP_rr, rpm, bpm)
 %PLOT_DIAGNOSTICO_RADAR Resume el flujo de procesamiento en tiempo/frecuencia.
 
+Fs_raw = cfg.fs;
 rx_raw = rx_raw(:);
 iq_bb = iq_bb(:);
 
@@ -79,18 +80,46 @@ figure('Name', 'Diagnostico radar signos vitales', ...
 sgtitle(sprintf('Diagnostico radar | RR %.1f rpm | HR %.1f bpm', rpm, bpm), ...
     'FontWeight', 'bold', 'FontSize', 14); % Ajuste de tamaño para que se vea bien
 
-% 1) Senal recibida cruda en tiempo.
+% 1) Envolvente de amplitud RX por bloque, a lo largo de TODA la
+% captura (no solo los primeros ms). Un punto por cada intento de
+% transmit+receive, tomado directamente de cw.m, asi que no depende del
+% indexado interno de rx_continuous ni se ve afectado si algun bloque
+% salio incompleto. Los bloques incompletos se marcan aparte para poder
+% distinguir "hubo señal real y baja" de "el bloque en si fallo".
 subplot(3, 2, 1);
-n_raw = min(numel(rx_raw), round(40 * Fs_raw)); % mostrar 40 segundos (o todo si es menor)
-t_raw_s = (0:n_raw-1) / Fs_raw;
-plot(t_raw_s, real(rx_raw(1:n_raw)), 'b');
-hold on;
-plot(t_raw_s, imag(rx_raw(1:n_raw)), 'r');
-grid on;
-xlabel('s');
-ylabel('amplitud');
-title('Senal recibida RX (primeros 40 s o totalidad)');
-legend('I', 'Q', 'Location', 'best');
+if isfield(cfg, 'block_peak') && isfield(cfg, 'block_rms')
+    n_blk = numel(cfg.block_peak);
+    t_blk_s = (0:n_blk-1) * (cfg.block_len / cfg.fs);
+    plot(t_blk_s, cfg.block_peak, 'b'); hold on;
+    plot(t_blk_s, cfg.block_rms, 'c');
+    yline(0.99, ':r');
+    idx_incompl = cfg.actual_counts ~= cfg.block_len;
+    leg = {'pico |bloque|', 'RMS bloque', 'umbral saturacion'};
+    if any(idx_incompl)
+        plot(t_blk_s(idx_incompl), cfg.block_peak(idx_incompl), 'rx', ...
+            'MarkerSize', 6, 'LineWidth', 1.2);
+        leg{end+1} = 'bloque incompleto';
+    end
+    grid on;
+    xlabel('s');
+    ylabel('amplitud');
+    title(sprintf('Envolvente RX, captura completa (%d/%d bloques incompletos)', ...
+        nnz(idx_incompl), n_blk));
+    legend(leg, 'Location', 'best');
+else
+    % cw.m antiguo sin instrumentacion por bloque: mostrar solo el
+    % primer tramo, como antes.
+    n_raw = min(numel(rx_raw), round(0.01 * Fs_raw));
+    t_raw_ms = (0:n_raw-1) / Fs_raw * 1e3;
+    plot(t_raw_ms, real(rx_raw(1:n_raw)), 'b');
+    hold on;
+    plot(t_raw_ms, imag(rx_raw(1:n_raw)), 'r');
+    grid on;
+    xlabel('ms');
+    ylabel('amplitud');
+    title('Senal recibida RX @1 MHz (solo primeros ms; cw.m sin instrumentar)');
+    legend('I', 'Q', 'Location', 'best');
+end
 
 % 2) Constelacion IQ baseband.
 subplot(3, 2, 2);
@@ -136,9 +165,6 @@ title('FFT respiracion: fase -> HP -> LP');
 
 % 6) FFT cardiaca despues de SIC + bandpass HR.
 subplot(3, 2, 6);
-plot(diag.f_hr_raw, diag.P_hr_raw_db, 'Color', [0.55 0.55 0.55], ...
-    'LineWidth', 0.9);
-hold on;
 plot(diag.f_hr, diag.P_hr_db, 'LineWidth', 1.2);
 hold on; 
 plot_candidatos_fft(diag.hr_cand_f, diag.hr_cand_db, 60, 'bpm');
@@ -151,7 +177,6 @@ xlim([0.4 3.6]);
 xlabel('Hz');
 ylabel('dB');
 title('FFT corazon: SIC -> bandpass HR');
-legend('antes SIC', 'despues SIC', 'candidatos', 'Location', 'best');
 end
 
 function diag = calcular_diagnostico_vital(iq_bb, Fs, dHP, dLP_rr, rpm, bpm)
@@ -200,11 +225,9 @@ dHR = designfilt('bandpassiir', 'FilterOrder', 4, ...
     'HalfPowerFrequency2', fmax_hr, ...
     'SampleRate', Fs);
 x_hr = filtfilt(dHR, x_rrfree);
-x_hr_raw = filtfilt(dHR, x);
 
 [diag.f_rr, diag.P_rr_db] = single_sided_fft_db(x_rr, Fs, 8);
 [diag.f_hr, diag.P_hr_db] = single_sided_fft_db(x_hr, Fs, 8);
-[diag.f_hr_raw, diag.P_hr_raw_db] = single_sided_fft_db(x_hr_raw, Fs, 8);
 diag.f_rr_est = f_rr_est;
 diag.f_hr_est = max(0.5, min(3.5, bpm / 60));
 [diag.rr_cand_f, diag.rr_cand_db] = top_spectral_candidates( ...
@@ -213,15 +236,11 @@ diag.f_hr_est = max(0.5, min(3.5, bpm / 60));
 [diag.hr_cand_f, diag.hr_cand_db] = top_spectral_candidates( ...
     diag.f_hr, diag.P_hr_db, diag.f_hr >= 45/60 & diag.f_hr <= 3.33, ...
     5, 0.08);
-[diag.hr_raw_cand_f, diag.hr_raw_cand_db] = top_spectral_candidates( ...
-    diag.f_hr_raw, diag.P_hr_raw_db, ...
-    diag.f_hr_raw >= 45/60 & diag.f_hr_raw <= 3.33, 5, 0.08);
 end
 
 function imprimir_candidatos_diagnostico(diag)
 fprintf('\n--- CANDIDATOS DIAGNOSTICO ---\n');
 fprintf('RR candidatos (rpm): %s\n', formatear_lista(diag.rr_cand_f * 60));
-fprintf('HR antes SIC (bpm): %s\n', formatear_lista(diag.hr_raw_cand_f * 60));
 fprintf('HR candidatos (bpm): %s\n', formatear_lista(diag.hr_cand_f * 60));
 fprintf('------------------------------\n');
 end

@@ -457,7 +457,7 @@ for i = 1:numel(idx_peaks)
             exp(-((f0 - h*f_rr).^2) / (2 * delta_low^2));
     end
     for h = 4:6
-        harm_pen = harm_pen + 0.35 * ...
+        harm_pen = harm_pen + 0.12 * ...
             exp(-((f0 - h*f_rr).^2) / (2 * delta_high^2));
     end
 
@@ -476,7 +476,7 @@ for i = 1:numel(idx_peaks)
         high_rate_penalty = 0.55;
     end
 
-    scores(i) = prom * adult_bonus * high_rate_penalty / (1 + 2.5 * harm_pen);
+    scores(i) = prom * adult_bonus * high_rate_penalty / (1 + 1 * harm_pen);
     f_cands(i) = f0;
 end
 
