@@ -10,12 +10,12 @@ cfg.fc = 5.8e9;              % Frecuencia portadora (Hz)
 cfg.fs = 1e6;                % Tasa de muestreo (Sa/s)
 cfg.bandwidth = 1e6;         % Ancho de banda (Hz)
 cfg.tx_tone_hz = 100e3;      % Tono Low-IF para evitar ruido 1/f
-cfg.tx_amplitude = 0.15;     % Amplitud (0 - 0.5)
+cfg.tx_amplitude = 0.07;     % Amplitud (0 - 0.5)
 
 cfg.tx_channel = 'TX1';
 cfg.rx_channel = 'RX2';      
 cfg.tx_gain = -45;           % dB
-cfg.rx_gain = -5;            % dB 
+cfg.rx_gain = -15;            % dB 
 cfg.rx_agc = 'manual';
 
 cfg.block_len = 10000;
@@ -68,7 +68,7 @@ b.tx.start();
 fprintf('Limpiando buffers USB...\n');
 % 2. Descartar bloques iniciales (Warm-up de buffers)
 for k = 1:30
-    b.transmit(tx_block, cfg.timeout_ms, 0, false, false);
+    b.transmit(tx_block);
     [~, ~, ~, ov_warmup] = b.receive(cfg.block_len);
     if ov_warmup
         warning('Overrun durante warm-up en iteración %d', k);
@@ -86,7 +86,9 @@ idx = 1;
 
 try
     for k = 1:cfg.num_blocks
-        b.transmit(tx_block, cfg.timeout_ms, 0, false, false);
+        % transmit() sin flags SOB/EOB evita cerrar el burst en cada
+        % bloque, reduciendo discontinuidades periodicas en fase.
+        b.transmit(tx_block);
         [rx, ~, actual_count, overrun] = b.receive(cfg.block_len);
 
 
@@ -114,6 +116,10 @@ catch ME
 end
 
 % Detener transmisión de forma segura
+if idx <= total_samples
+    rx_continuous = rx_continuous(1:idx-1);
+end
+
 b.transmit(complex(zeros(cfg.block_len, 1)), cfg.timeout_ms, 0, false, true);
 
 

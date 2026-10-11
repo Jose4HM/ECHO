@@ -1,4 +1,4 @@
-% =========================================================================
+    % =========================================================================
 % MASTER SCRIPT: RADAR DE SIGNOS VITALES
 % =========================================================================
 clear; clc; close all;
@@ -33,7 +33,7 @@ dLP_rr = designfilt('lowpassiir', 'FilterOrder', 2, ...
 
 % --- PASO 3: PROCESAMIENTO ---
 fprintf('Datos capturados. Procesando signos vitales...\n');
-[rpm, bpm] = procesar_signos_vitales_fixed(iq_frontend, Fs_frontend, dHP, dLP_rr);
+[rpm, bpm, vital_info] = procesar_signos_vitales_fixed(iq_frontend, Fs_frontend, dHP, dLP_rr);
 
 % --- PASO 4: RESULTADOS ---
 fprintf('=============================\n');
@@ -41,6 +41,21 @@ fprintf('RESULTADOS FINALES:\n');
 fprintf('Respiracion: %.1f rpm\n', rpm);
 fprintf('Ritmo cardiaco: %.1f bpm\n', bpm);
 fprintf('=============================\n');
+
+if vital_info.rr_fallback
+    fprintf(2, ['AVISO: RR = %.1f rpm es un valor GENERICO de fallback, ' ...
+        'no una deteccion real. No hubo ningun pico valido en la banda ' ...
+        'de respiracion.\n'], rpm);
+end
+if vital_info.hr_fallback
+    fprintf(2, ['AVISO: HR = %.1f bpm es un valor GENERICO de fallback, ' ...
+        'no una deteccion real. No hubo ningun candidato en la banda ' ...
+        'cardiaca.\n'], bpm);
+elseif vital_info.hr_low_confidence
+    fprintf(2, ['AVISO: HR = %.1f bpm proviene de un pico real pero de ' ...
+        'baja confianza (prominencia %.2f, ratio %.2f). Tratar con ' ...
+        'cautela.\n'], bpm, vital_info.hr_prominence, vital_info.hr_score_ratio);
+end
 
 % --- PASO 5: GRAFICAS DE DIAGNOSTICO ---
 plot_diagnostico_radar(rx_continuous, cfg.fs, iq_frontend, Fs_frontend, ...
@@ -66,15 +81,15 @@ sgtitle(sprintf('Diagnostico radar | RR %.1f rpm | HR %.1f bpm', rpm, bpm), ...
 
 % 1) Senal recibida cruda en tiempo.
 subplot(3, 2, 1);
-n_raw = min(numel(rx_raw), round(0.01 * Fs_raw));
-t_raw_ms = (0:n_raw-1) / Fs_raw * 1e3;
-plot(t_raw_ms, real(rx_raw(1:n_raw)), 'b');
+n_raw = min(numel(rx_raw), round(40 * Fs_raw)); % mostrar 40 segundos (o todo si es menor)
+t_raw_s = (0:n_raw-1) / Fs_raw;
+plot(t_raw_s, real(rx_raw(1:n_raw)), 'b');
 hold on;
-plot(t_raw_ms, imag(rx_raw(1:n_raw)), 'r');
+plot(t_raw_s, imag(rx_raw(1:n_raw)), 'r');
 grid on;
-xlabel('ms');
+xlabel('s');
 ylabel('amplitud');
-title('Senal recibida RX @1 MHz');
+title('Senal recibida RX (primeros 40 s o totalidad)');
 legend('I', 'Q', 'Location', 'best');
 
 % 2) Constelacion IQ baseband.
@@ -121,6 +136,9 @@ title('FFT respiracion: fase -> HP -> LP');
 
 % 6) FFT cardiaca despues de SIC + bandpass HR.
 subplot(3, 2, 6);
+plot(diag.f_hr_raw, diag.P_hr_raw_db, 'Color', [0.55 0.55 0.55], ...
+    'LineWidth', 0.9);
+hold on;
 plot(diag.f_hr, diag.P_hr_db, 'LineWidth', 1.2);
 hold on; 
 plot_candidatos_fft(diag.hr_cand_f, diag.hr_cand_db, 60, 'bpm');
@@ -133,6 +151,7 @@ xlim([0.4 3.6]);
 xlabel('Hz');
 ylabel('dB');
 title('FFT corazon: SIC -> bandpass HR');
+legend('antes SIC', 'despues SIC', 'candidatos', 'Location', 'best');
 end
 
 function diag = calcular_diagnostico_vital(iq_bb, Fs, dHP, dLP_rr, rpm, bpm)
@@ -181,9 +200,11 @@ dHR = designfilt('bandpassiir', 'FilterOrder', 4, ...
     'HalfPowerFrequency2', fmax_hr, ...
     'SampleRate', Fs);
 x_hr = filtfilt(dHR, x_rrfree);
+x_hr_raw = filtfilt(dHR, x);
 
 [diag.f_rr, diag.P_rr_db] = single_sided_fft_db(x_rr, Fs, 8);
 [diag.f_hr, diag.P_hr_db] = single_sided_fft_db(x_hr, Fs, 8);
+[diag.f_hr_raw, diag.P_hr_raw_db] = single_sided_fft_db(x_hr_raw, Fs, 8);
 diag.f_rr_est = f_rr_est;
 diag.f_hr_est = max(0.5, min(3.5, bpm / 60));
 [diag.rr_cand_f, diag.rr_cand_db] = top_spectral_candidates( ...
@@ -192,11 +213,15 @@ diag.f_hr_est = max(0.5, min(3.5, bpm / 60));
 [diag.hr_cand_f, diag.hr_cand_db] = top_spectral_candidates( ...
     diag.f_hr, diag.P_hr_db, diag.f_hr >= 45/60 & diag.f_hr <= 3.33, ...
     5, 0.08);
+[diag.hr_raw_cand_f, diag.hr_raw_cand_db] = top_spectral_candidates( ...
+    diag.f_hr_raw, diag.P_hr_raw_db, ...
+    diag.f_hr_raw >= 45/60 & diag.f_hr_raw <= 3.33, 5, 0.08);
 end
 
 function imprimir_candidatos_diagnostico(diag)
 fprintf('\n--- CANDIDATOS DIAGNOSTICO ---\n');
 fprintf('RR candidatos (rpm): %s\n', formatear_lista(diag.rr_cand_f * 60));
+fprintf('HR antes SIC (bpm): %s\n', formatear_lista(diag.hr_raw_cand_f * 60));
 fprintf('HR candidatos (bpm): %s\n', formatear_lista(diag.hr_cand_f * 60));
 fprintf('------------------------------\n');
 end

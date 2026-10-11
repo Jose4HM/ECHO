@@ -1,4 +1,4 @@
-function [rpm_est, bpm_est] = procesar_signos_vitales_fixed(buffer_IQ, Fs, dHP, dLP_rr)
+function [rpm_est, bpm_est, info] = procesar_signos_vitales_fixed(buffer_IQ, Fs, dHP, dLP_rr)
 % PROCESAR_SIGNOS_VITALES  Extrae respiración y ritmo cardíaco de la señal
 % IQ de un radar CW Doppler (bladeRF 2.0).
 %
@@ -11,8 +11,24 @@ function [rpm_est, bpm_est] = procesar_signos_vitales_fixed(buffer_IQ, Fs, dHP, 
 % Salidas:
 %   rpm_est – Tasa respiratoria estimada (rpm)
 %   bpm_est – Frecuencia cardíaca estimada (bpm)
+%   info    – Struct con banderas de diagnostico (para no confundir un
+%             valor generico con una deteccion real):
+%               .rr_fallback       true si RR no encontro pico real en
+%                                   banda y se devolvio el generico (15 rpm)
+%               .hr_fallback       true si HR no encontro ningun
+%                                   candidato en banda y se devolvio el
+%                                   generico (75 bpm)
+%               .hr_low_confidence true si HR si encontro un pico pero
+%                                   con poca prominencia/ratio de confianza
+%               .hr_prominence, .hr_score_ratio  metricas crudas de HR
 
 pad_mult = 8;   % Zero-padding para interpolación espectral fina
+
+% Banderas de diagnostico: por defecto asumimos deteccion real; se
+% marcan como fallback solo en los puntos donde el codigo realmente
+% recurre a un valor fisiologico generico en vez de una medicion.
+info = struct('rr_fallback', false, 'hr_fallback', false, ...
+    'hr_low_confidence', false, 'hr_prominence', 0, 'hr_score_ratio', 0);
 
 % Validar que los filtros pre-diseñados (dHP, dLP_rr) sean consistentes
 % con el Fs de este buffer. Si el objeto de filtro expone 'SampleRate'
@@ -147,6 +163,7 @@ if any(mask_rr)
 end
 
 if isnan(f_rr_est) || f_rr_est < rr_min_hz || f_rr_est > rr_max_hz
+    info.rr_fallback = true;   % No se encontro un pico real en banda
     f_rr_est = 0.25;   % 15 RPM: valor adulto en reposo típico
 end
 rpm_est = double(60 * f_rr_est(1));   % Garantizar escalar
@@ -238,6 +255,7 @@ cands_f = f_hr_ax(mask_final);
 cands_P = P_hr(mask_final);
 
 if isempty(cands_f)
+    info.hr_fallback = true;   % No hay ningun candidato en banda
     bpm_est = 75;   % Fallback
     return;
 end
@@ -254,6 +272,7 @@ score(~isfinite(score)) = 0;
 
 if ~any(score > 0)
     % Sin candidato válido: devolver fallback fisiológico
+    info.hr_fallback = true;
     bpm_est = 75;
     return;
 end
@@ -269,8 +288,12 @@ if any(mask_final)
     bpm_est = 60 * f_hr_est;
 end
 
+info.hr_prominence = hr_quality.prominence;
+info.hr_score_ratio = hr_quality.score_ratio;
+info.hr_low_confidence = hr_quality.prominence < 2.0 || hr_quality.score_ratio < 1.12;
+
 % Guardia fisiológica final — también garantiza escalar
-if hr_quality.prominence < 2.0 || hr_quality.score_ratio < 1.12
+if info.hr_low_confidence
     warning(['HR con baja confianza: prominencia %.2f, ratio %.2f. ' ...
         'Si no coincide con el valor real, probablemente domina residuo ' ...
         'respiratorio/multipath.'], ...
