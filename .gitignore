@@ -1,0 +1,6 @@
+# Ignorar todos los archivos .mat
+*.mat
+
+# Archivos temporales de MATLAB
+*.asv
+*.autosave
