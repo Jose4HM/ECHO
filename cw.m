@@ -1,11 +1,7 @@
 function [rx_continuous, cfg] = cw()
-% =========================================================================
-% CAPTURA ROBUSTA BLADERF - RADAR CW (ONDA CONTINUA)   v8
-% -------------------------------------------------------------------------
-% CAMBIOS v8:
-%  [1] Se borró la última parte: si eran más de 3 ventanas se sacaba la
-%  mediana y si eran 1 o 2, se calculaba la media
-% =========================================================================
+%CW Captura continua para radar CW con bladeRF 2.0.
+%   Genera un tono Low-IF, captura I/Q crudo y registra diagnosticos de
+%   continuidad, saturacion y nivel antes del procesamiento fisiologico.
 
 cfg = struct();
 cfg.serial = '8c14dec0ebc947b88424691d0dbf744f';
@@ -16,7 +12,7 @@ cfg.fc = 5.94e9;             % Portadora (Hz). 5.8 GHz estaba inutilizable:
 cfg.fs = 1e6;                % Tasa de muestreo (Sa/s)
 cfg.bandwidth = 1e6;         % Ancho de banda (Hz)
 cfg.tx_tone_hz = 100e3;      % Tono Low-IF para evitar ruido 1/f
-cfg.tx_amplitude = 0.25;     % Amplitud inicial (0 - 0.5); se autocalibra
+cfg.tx_amplitude = 0.25;     % Amplitud digital (0 - 0.5)
 
 cfg.tx_channel = 'TX1';
 cfg.rx_channel = 'RX2';
@@ -31,7 +27,7 @@ cfg.rx_agc  = 'manual';
 % AD9361 aunque se lea de vuelta bien. Se comprobo tres veces, incluida
 % una con WiFi entrando a 0.4 de fondo de escala: el nivel no cambia al
 % mover rx_gain 72 dB. Por tanto el guardian estricto solo estorba aqui.
-% Se deja en false si se trabaja con otro equipo
+% Poner true solo si el binding aplica la ganancia RX de forma fiable.
 cfg.strict_gain = false;
 cfg.gain_tol_db = 3;
 
@@ -56,8 +52,11 @@ assert(cfg.tx_amplitude > 0 && cfg.tx_amplitude <= 0.5, ...
     'cfg.tx_amplitude debe estar entre 0 y 0.5.');
 
 samples_per_period = cfg.fs / cfg.tx_tone_hz;
+assert(abs(samples_per_period - round(samples_per_period)) < 1e-12, ...
+    'fs/tx_tone_hz debe ser entero para repetir el tono sin salto de fase.');
+samples_per_period = round(samples_per_period);
 assert(mod(cfg.block_len, samples_per_period) == 0, ...
-    'cfg.block_len debe ser multiplo entero de fs/tx_tone_hz para fase continua entre bloques.');
+    'cfg.block_len debe contener un numero entero de periodos del tono.');
 
 if exist('bladeRF', 'class') ~= 8 && exist('bladeRF', 'file') ~= 2
     error('No se encontro bladeRF.m en el path.');
@@ -83,15 +82,14 @@ tx_zeros = complex(zeros(cfg.block_len, 1));
 % =========================================================================
 % 1. WARM-UP
 % =========================================================================
-fprintf('Esperando estabilizacion de osciladores a 5.8 GHz (Cold Start)...\n');
+fprintf('Esperando bloqueo inicial de sintetizadores a %.3f GHz...\n', cfg.fc/1e9);
 pause(1.0);
 
 fprintf('Iniciando RX %s y TX %s...\n', cfg.rx_channel, cfg.tx_channel);
 b.rx.start();
 b.tx.start();
 
-% Octavo intento de fijar la ganancia, ahora con el stream arrancado.
-% En algunos bindings la escritura previa al start() no persiste.
+% Reafirmar la ganancia despues de arrancar el stream.
 cfg = reafirmar_ganancia_rx(b, cfg);
 
 fprintf('Limpiando buffers USB...\n');
@@ -107,38 +105,33 @@ end
 % 2. LINEA BASE CON TX APAGADO
 % =========================================================================
 fprintf('\n--- LINEA BASE (TX APAGADO) ---\n');
-[pk_off, rms_off] = medir_nivel(b, cfg, tx_zeros, cfg.baseline_blocks);
-fprintf('Pico  sin TX: %.4f\n', pk_off);
+[pk_off, rms_off, pk_comp_off] = medir_nivel(b, cfg, tx_zeros, cfg.baseline_blocks);
+fprintf('Pico |IQ| sin TX: %.4f   pico componente I/Q: %.4f\n', pk_off, pk_comp_off);
 fprintf('RMS   sin TX: %.5f (%.1f dBFS)\n', rms_off, 20*log10(rms_off + 1e-12));
 
-[pk_on, rms_on] = medir_nivel(b, cfg, tx_block, cfg.baseline_blocks);
-fprintf('Pico  con TX: %.4f\n', pk_on);
+[pk_on, rms_on, pk_comp_on] = medir_nivel(b, cfg, tx_block, cfg.baseline_blocks);
+fprintf('Pico |IQ| con TX: %.4f   pico componente I/Q: %.4f\n', pk_on, pk_comp_on);
 fprintf('RMS   con TX: %.5f (%.1f dBFS)\n', rms_on, 20*log10(rms_on + 1e-12));
 razon_db = 20*log10((rms_on + 1e-12) / (rms_off + 1e-12));
-fprintf('Fuga TX sobre el piso: %.1f dB\n', razon_db);
+fprintf('Incremento RMS al activar TX: %.1f dB\n', razon_db);
 
 cfg.baseline_peak_off = pk_off;
 cfg.baseline_rms_off  = rms_off;
 cfg.baseline_peak_on  = pk_on;
+cfg.baseline_peak_component_off = pk_comp_off;
+cfg.baseline_peak_component_on  = pk_comp_on;
 cfg.baseline_rms_on   = rms_on;
 cfg.leak_over_floor_db = razon_db;
 
-if pk_off >= 0.95
-    error(['El receptor SE SATURA CON EL TRANSMISOR APAGADO (pico %.3f).\n' ...
-        'Tu radar no tiene nada que ver con esto. Causas por orden de\n' ...
-        'probabilidad:\n' ...
-        '  1) La ganancia RX sigue alta (real: %.1f dB). Corre diag_ganancia.\n' ...
-        '  2) Interferencia externa en 5.8 GHz: WiFi de 5 GHz (U-NII-3,\n' ...
-        '     5725-5850 MHz) o video FPV. Prueba a apagar los APs cercanos,\n' ...
-        '     girar la antena, o mover cfg.fc.\n' ...
-        'No tiene sentido capturar 60 s en estas condiciones.'], ...
-        pk_off, cfg.rx_gain_actual);
+if pk_comp_off >= 0.99
+    error(['El receptor satura con TX digitalmente apagado (pico I/Q %.3f). ' ...
+        'Revise ganancia RX e interferencia externa cerca de %.3f GHz antes de capturar.'], ...
+        pk_comp_off, cfg.fc/1e9);
 end
 
 if razon_db < 6
-    warning(['La fuga TX solo esta %.1f dB por encima del piso de ruido. ' ...
-        'La senal util quedara enterrada. Sube cfg.tx_amplitude o revisa ' ...
-        'que el TX este realmente radiando (cable, conector, antena).'], razon_db);
+    warning(['El RMS solo aumenta %.1f dB al activar TX. Verifique que el ' ...
+        'tono Low-IF este presente y que TX/antenas funcionen correctamente.'], razon_db);
 end
 
 % =========================================================================
@@ -252,7 +245,10 @@ if total_actual < total_samples
         'eje de tiempo a Fs=%.0f Hz ya no corresponde a los %.1f s nominales.'], ...
         total_actual, total_samples, cfg.fs, cfg.capture_seconds);
 end
-rx_continuous = rx_continuous(1:max(total_actual, 1));
+if total_actual == 0
+    error('No se recibio ninguna muestra valida.');
+end
+rx_continuous = rx_continuous(1:total_actual);
 
 b.transmit(tx_zeros, cfg.timeout_ms, 0, false, true);
 
@@ -292,6 +288,7 @@ cfg.block_rms = block_rms;
 cfg.n_incomplete_blocks = n_incomplete;
 cfg.total_actual_samples = total_actual;
 cfg.peak_global = pk_global;
+cfg.capture_valid = (total_overruns == 0) && (total_actual > 0);
 
 clear cleanup_obj;
 fprintf('Captura finalizada.\n');
@@ -299,14 +296,15 @@ fprintf('Captura finalizada.\n');
 % =========================================================================
 % FUNCIONES AUXILIARES
 % =========================================================================
-function [pk, rms_v] = medir_nivel(b, cfg, tx_blk, nblocks)
-    pk = 0; acc = 0; cnt = 0;
+function [pk, rms_v, pk_comp] = medir_nivel(b, cfg, tx_blk, nblocks)
+    pk = 0; pk_comp = 0; acc = 0; cnt = 0;
     for kk = 1:nblocks
         b.transmit(tx_blk, cfg.timeout_ms, 0, false, false);
         [rxm, ~, nc, ~] = b.receive(cfg.block_len);
         if nc > 0
             a = abs(rxm(1:nc));
             pk = max(pk, max(a));
+            pk_comp = max(pk_comp, max([abs(real(rxm(1:nc))); abs(imag(rxm(1:nc)))]));
             acc = acc + sum(a.^2);
             cnt = cnt + nc;
         end
