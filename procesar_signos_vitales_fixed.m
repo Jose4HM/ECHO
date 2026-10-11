@@ -22,29 +22,7 @@ function [rpm_est, bpm_est, info] = procesar_signos_vitales_fixed(buffer_IQ, Fs,
 %       .hr_window_bpm        HR estimado en cada ventana deslizante
 %       .hr_agreement         Fraccion de ventanas que coinciden +-5 bpm
 %       .rr_fallback / .hr_fallback / .hr_low_confidence
-%
-% -------------------------------------------------------------------------
-% CAMBIOS v4 (los importantes):
-%  [1] EL BUG PRINCIPAL: antes se centraba la trayectoria IQ restando la
-%      MEDIA. La senal IQ es un ARCO DE CIRCUNFERENCIA cuyo centro es el
-%      clutter estatico + la fuga TX->RX. Para que angle() mida el
-%      desplazamiento del pecho, el origen tiene que estar en el CENTRO
-%      DEL CIRCULO, no en el centroide del arco. Para un arco de 1.2 rad
-%      el centroide esta a 0.94R del centro: al restar la media, el
-%      origen quedaba practicamente ENCIMA de la trayectoria, angle()
-%      barria de forma violentamente no lineal y fabricaba armonicos que
-%      ahogaban el latido. Ahora se ajusta un circulo (Kasa) por ventanas.
-%  [2] Cancelacion de respiracion ADAPTATIVA: antes era un ajuste unico de
-%      3 armonicos a frecuencia fija sobre toda la captura. La respiracion
-%      real deriva +-10%, y el residuo cae justo en la banda cardiaca.
-%      Ahora se ajusta por ventanas deslizantes, con refinamiento local de
-%      f_rr en cada ventana y hasta 6 armonicos, con overlap-add.
-%  [3] Detrend polinomico de orden 3 (no lineal) para la deriva termica
-%      entre los sintetizadores de TX y RX, que no es una rampa perfecta.
-%  [4] Recorte de bordes tras filtrar, para eliminar transitorios.
-%  [5] Metrica de confianza real: HR estimado en ventanas deslizantes y
-%      porcentaje de acuerdo entre ellas.
-% -------------------------------------------------------------------------
+
 
 % ---------------- Parametros ---------------------------------------------
 pad_mult      = 8;     % Zero-padding para interpolacion espectral fina
@@ -221,13 +199,6 @@ info.center_offset_ratio = abs(c0) / (R0 + eps);
 Z = S_iq - c_t;             % <-- centrado CORRECTO (centro del circulo)
 
 phi_raw = unwrap(angle(Z));
-
-% % --- INYECCIÓN SINTÉTICA DE PRUEBA ---
-% % Creamos un eje de tiempo real para la señal
-% n_vec = (0:numel(phi_raw)-1).'; 
-% % Inyectamos una onda pura de 1.8 Hz (108 bpm) con amplitud de 0.05 rad
-% phi_raw = phi_raw + 0.05 * sin(2*pi*1.8 * n_vec / Fs); 
-% % ------------------------------------
 
 info.arc_span_rad = max(phi_raw) - min(phi_raw);
 
@@ -435,10 +406,8 @@ end
 % la meseta 0.5-1.5 Hz (donde caen los armonicos 2o a 6o de la respiracion,
 % y tambien el latido) y elige un maximo local en 2.05 Hz que esta LIBRE de
 % armonicos pero tambien de senal. Medido: 122.7 bpm con verdad de 72.
-%
-% Si mides a alguien tras esfuerzo, o a un nino, sube este limite.
 hr_min_bpm = 55;
-hr_max_bpm = 130;
+hr_max_bpm = 160;
 fmin_hr = max(fmin_hr, hr_min_bpm/60);
 fmax_hr = hr_max_bpm/60;
 fprintf('Banda cardiaca de busqueda: %.0f-%.0f bpm (adulto en reposo).\n', ...
@@ -748,12 +717,14 @@ end
 % =========================================================================
 % ESPECTRO
 % =========================================================================
-function [f_ax, P, bin_hz] = espectro(x, Fs, pad_mult)
+function [f_ax, P, bin_hz] = espectro(x, Fs, pad_mult, usar_hamming)
+if nargin < 4, usar_hamming = true; end
 x = x(:);
 Nx = numel(x);
 Nfft = 2^nextpow2(max(4096, pad_mult * Nx));
 bin_hz = Fs / Nfft;
-X = fft((x - mean(x)) .* hamming(Nx), Nfft);
+if usar_hamming, wv = hamming(Nx); else, wv = ones(Nx, 1); end
+X = fft((x - mean(x)) .* wv, Nfft);
 K = floor(Nfft/2) + 1;
 f_ax = (0:K-1).' * bin_hz;
 P = abs(X(1:K));
@@ -886,7 +857,7 @@ k = idx(i_rel);
 end
 
 function [f_est, quality] = select_hr_peak_robust(f_ax, P, mask, f_rr)
-quality = struct('prominence', 0, 'score_ratio', 0);
+quality = struct('prominence', 0, 'score', 0, 'score_ratio', 0);
 idx_band = find(mask);
 if isempty(idx_band)
     f_est = 75 / 60;
@@ -900,12 +871,14 @@ if isempty(idx_peaks)
 end
 
 scores = zeros(size(idx_peaks));
+proms  = zeros(size(idx_peaks));
 f_cands = zeros(size(idx_peaks));
 for i = 1:numel(idx_peaks)
     k = idx_peaks(i);
     f0 = f_ax(k);
     local_floor = local_noise_floor(f_ax, P, f0, 0.35, 0.06, mask);
     prom = P(k) / (local_floor + eps);
+    proms(i) = prom;
 
     harm_pen = 0;
     delta_low  = max(0.05,  0.10 * f_rr);
@@ -941,7 +914,8 @@ if ~any(scores > 0)
 else
     [~, best] = max(scores);
     f_est = f_cands(best);
-    quality.prominence = scores(best);
+    quality.prominence = proms(best);
+    quality.score      = scores(best);
     sorted_scores = sort(scores(:), 'descend');
     if numel(sorted_scores) >= 2 && sorted_scores(2) > 0
         quality.score_ratio = sorted_scores(1) / sorted_scores(2);
@@ -956,7 +930,7 @@ idx_peaks = [];
 for ii = 1:numel(idx_band)
     k = idx_band(ii);
     if k > 1 && k < numel(P) && P(k) >= P(k-1) && P(k) >= P(k+1)
-        idx_peaks(end+1) = k; %#ok<AGROW>
+        idx_peaks(end+1) = k; 
     end
 end
 end
@@ -1091,28 +1065,13 @@ w   = w / sqrt(mean(w.^2));        % conserva la potencia
 
 inicios = 1:hop:(N - L + 1);
 
-% MEDIANA de periodogramas, no media.
-%
-% La media suma potencias, asi que una sola ventana contaminada -- un
-% movimiento del sujeto, un salto de desenrollado -- arrastra el espectro
-% completo. Se observo repetidamente: ventanas de HR como (82.4, 79.1,
-% 46.1) o (60.4, 86.1, 82.4), donde una de tres estaba disparatada.
-%
-% La mediana descarta ese valor automaticamente: un pico presente en todas
-% las ventanas sobrevive, uno presente en una sola no. Es la tecnica
-% estandar (periodograma promediado por mediana) en cualquier campo con
-% transitorios en los datos.
-%
-% Introduce un sesgo multiplicativo constante en la amplitud (factor ln2
-% para ruido exponencial), pero eso NO afecta a la POSICION del pico, que
-% es lo unico que se usa aqui.
 Pmat = [];
 for i = 1:numel(inicios)
     seg = x(inicios(i) : inicios(i)+L-1);
     seg = seg - mean(seg);
-    [f_ax, Pi, ~] = espectro(seg .* w, Fs, pad_mult);
-    Pmat(:, end+1) = Pi(:);   %#ok<AGROW>
+    [f_ax, Pi, ~] = espectro(seg .* w, Fs, pad_mult, false);
+    Pmat(:, end+1) = Pi(:);
 end
 
-P = mean(Pmat, 2);        % con 1 o 2 ventanas la mediana no aporta
+P = mean(Pmat, 2);
 end

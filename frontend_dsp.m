@@ -6,7 +6,7 @@ function [iq_out, Fs] = frontend_dsp(iq_in, cfg)
 %             procesar_signos_vitales_fixed.
 %
 % -------------------------------------------------------------------------
-% CAMBIOS v4:
+% CAMBIOS v8, desde la versión 4 no se ha cambiado:
 %  [1] SALIDA A 100 Hz, no a 4 kHz. Las senales fisiologicas viven por
 %      debajo de 3.5 Hz. A 4 kHz, un paso-alto de 0.1 Hz queda con polos a
 %      radio 0.99992: mal condicionado, con transitorios de decenas de
@@ -108,14 +108,11 @@ end
 
 % =========================================================================
 function [y, Fs_out] = etapa_decimacion(x, Fs_in, fc, order, R)
-%ETAPA_DECIMACION FIR paso-bajo de fase cero + downsample por R.
-%   Se verifica explicitamente que la banda de rechazo del FIR (aprox.
-%   fc + 4*Fs_in/order) caiga por debajo del Nyquist de salida.
 
 Fs_out = Fs_in / R;
 nyq_out = Fs_out / 2;
 
-transicion = 4 * Fs_in / order;   % ancho aproximado de la transicion FIR
+transicion = 4 * Fs_in / order;
 f_stop = fc + transicion;
 if f_stop > nyq_out
     warning(['Etapa de decimacion R=%d: la banda de rechazo empieza en ' ...
@@ -133,17 +130,10 @@ end
 
 bcoef = fir1(order, fc / (Fs_in/2));
 
-% upfirdn filtra y decima en una sola pasada, calculando SOLO las muestras
-% que sobreviven al downsampling: R veces mas rapido que filtrar todo y
-% tirar el 98% de las muestras. Se aplica por separado a I y Q para no
-% depender del soporte de entrada compleja.
 yr = upfirdn(real(x), bcoef, 1, R);
 yi = upfirdn(imag(x), bcoef, 1, R);
 y = complex(yr, yi);
 
-% Compensar el retardo de grupo del FIR (lineal, = order/2 muestras a la
-% entrada) y recortar la cola de transitorio, para que el eje de tiempo de
-% la salida siga correspondiendo al de la entrada.
 d = floor((order/2) / R);
 n_out = floor(numel(x) / R);
 i0 = d + 1;
@@ -153,8 +143,6 @@ end
 
 % =========================================================================
 function f_tone = estimar_tono(x, Fs, f_nominal)
-%ESTIMAR_TONO Localiza el pico espectral cerca de f_nominal e interpola.
-%   Usa un tramo central de la captura para no depender de transitorios.
 
 Nmax = min(numel(x), 2^20);
 i0 = max(1, floor((numel(x) - Nmax)/2) + 1);
@@ -201,6 +189,8 @@ if abs(f_tone - f_nominal) > 2e3
 end
 end
 
+% =========================================================================
+%               FUNCIONES AUXILIARES
 % =========================================================================
 function plot_spectrum(x, Fs, nfft_max, ttl, unit_label, unit_scale)
 Nfft = min(nfft_max, numel(x));

@@ -82,7 +82,7 @@ subplot(3, 3, 6);
 t_h = (0:numel(info.x_hr)-1).' / info.Fs;
 plot(t_h, info.x_hr, 'LineWidth', 0.8);
 grid on; xlabel('s'); ylabel('rad');
-title(sprintf('Cardiaca tras cancelar respiracion (%.1f bpm)', bpm));
+title(sprintf('Cardiaca filtrada (%.1f bpm)', bpm));
 
 % ---- 7) FFT respiracion ----------------------------------------------
 subplot(3, 3, 7);

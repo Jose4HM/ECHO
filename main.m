@@ -1,18 +1,6 @@
 % =========================================================================
-% MASTER SCRIPT: RADAR DE SIGNOS VITALES  (v7)
-% -------------------------------------------------------------------------
-% CAMBIOS v7:
-%  [1] Se cambia el espectro promediado por la mediana a espectro
-%      promediado por
-%      la media. Revisar
-%      línea 1122
-%      procesar_signos_vitales_fixed.m, se cambio la condicional solo por
-%      P = mean(Pmat, 2);
-%  [2] Se cambió el bloque de correción de desiquilibrio, ya que el propio
-%  chip contiene calibración I/Q
-%  [3] Se añadio código de
-%  inyección de una señal sintetica de 108 bpm para hacer pruebas
-% =========================================================================
+% MASTER SCRIPT: RADAR DE SIGNOS VITALES  (v4)
+
 clear; clc; close all;
 
 % --- PASO 1: CAPTURA ---
@@ -54,14 +42,7 @@ end
 %              o el recorte de bordes se lleva medio registro.
 protocolo = 'normal';        % <-- 'normal' | 'pautada'
 
-switch protocolo
-    case 'normal'
-        fc_hp = 0.08;
-    case 'pautada'
-        fc_hp = 0.04;
-    otherwise
-        error('protocolo debe ser ''normal'' o ''pautada''.');
-end
+fc_hp = 0.08;
 
 dur_s = numel(iq_frontend) / Fs_frontend;
 if fc_hp < 0.06 && dur_s < 25
@@ -200,7 +181,7 @@ subplot(3, 3, 6);
 t_h = (0:numel(info.x_hr)-1).' / info.Fs;
 plot(t_h, info.x_hr, 'LineWidth', 0.8);
 grid on; xlabel('s'); ylabel('rad');
-title(sprintf('Cardiaca tras cancelar respiracion (%.1f bpm)', bpm));
+title(sprintf('Cardiaca filtrada (%.1f bpm)', bpm));
 
 % ---- 7) FFT respiracion ----------------------------------------------
 subplot(3, 3, 7);
@@ -230,7 +211,7 @@ subplot(3, 3, 9);
 if ~isempty(info.hr_window_bpm)
     stem(1:numel(info.hr_window_bpm), info.hr_window_bpm, 'filled'); hold on;
     yline(bpm, '--r');
-    yline(bpm+5, ':k'); yline(bpm-5, ':k');
+    yline(bpm+5, ':y'); yline(bpm-5, ':y');
     grid on; xlabel('ventana'); ylabel('bpm');
     ylim([max(30, bpm-45) min(200, bpm+45)]);
     title(sprintf('HR por ventana (acuerdo %.0f%%)', 100*info.hr_agreement));

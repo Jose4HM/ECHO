@@ -1,22 +1,10 @@
 function [rx_continuous, cfg] = cw()
 % =========================================================================
-% CAPTURA ROBUSTA BLADERF - RADAR CW (ONDA CONTINUA)   v5
+% CAPTURA ROBUSTA BLADERF - RADAR CW (ONDA CONTINUA)   v8
 % -------------------------------------------------------------------------
-% CAMBIOS v5 (a raiz del log de diagnostico):
-%  [1] La ganancia RX se escribe, se relee y se REINTENTA. Si el hardware
-%      devuelve el maximo (60 dB) cuando pediste 10, no es un recorte a
-%      rango: es que la escritura no tomo efecto (AGC activo o nombre de
-%      propiedad distinto). Ahora se prueban 'agc' y 'gain_mode', se
-%      reintenta tras arrancar el stream, y si sigue mal se ABORTA en vez
-%      de gastar 60 s capturando basura.
-%  [2] MEDIDA DE LINEA BASE CON TX APAGADO antes de nada. Es lo unico que
-%      separa "me satura mi propia fuga TX->RX" de "me satura algo
-%      externo" (a 5.8 GHz, tipicamente WiFi de 5 GHz).
-%  [3] La autocalibracion ahora comprueba primero que el nivel RX RESPONDA
-%      a la amplitud de TX. Si bajar la amplitud 4x no mueve el pico, la
-%      saturacion no es tuya: aborta y RESTAURA la amplitud original en vez
-%      de seguir bajandola hasta dejar el transmisor inutil.
-%  [4] rx_gain por defecto a 0 dB.
+% CAMBIOS v8:
+%  [1] Se borró la última parte: si eran más de 3 ventanas se sacaba la
+%  mediana y si eran 1 o 2, se calculaba la media
 % =========================================================================
 
 cfg = struct();
@@ -24,54 +12,39 @@ cfg.serial = '8c14dec0ebc947b88424691d0dbf744f';
 
 cfg.fc = 5.94e9;             % Portadora (Hz). 5.8 GHz estaba inutilizable:
                              % el barrido de banda mostro WiFi saturando en
-                             % 5.79 / 5.82 / 5.85 GHz (U-NII-3). 5.94 GHz esta
-                             % limpio y la antena lo cubre (hasta 6000 MHz).
+                             % 5.79 / 5.82 / 5.85 GHz (scan_banda.m)
 cfg.fs = 1e6;                % Tasa de muestreo (Sa/s)
 cfg.bandwidth = 1e6;         % Ancho de banda (Hz)
 cfg.tx_tone_hz = 100e3;      % Tono Low-IF para evitar ruido 1/f
-cfg.tx_amplitude = 0.16;     % Amplitud inicial (0 - 0.5); se autocalibra
+cfg.tx_amplitude = 0.25;     % Amplitud inicial (0 - 0.5); se autocalibra
 
 cfg.tx_channel = 'TX1';
 cfg.rx_channel = 'RX2';
-cfg.tx_gain = 60;            % dB. El TX es el UNICO mando de nivel util en
-                             % esta placa. A -24 (el minimo) el eco del pecho
-                             % quedaba enterrado en el ruido: la respiracion
-                             % apenas sobrevivia y el latido nunca.
-cfg.rx_gain = 0;             % dB. Sin efecto en este binding; se deja por
-                             % compatibilidad.
+cfg.tx_gain = 65;            % dB. El TX es el UNICO mando de nivel util en
+                             % esta placa. A -24 dB el eco del pecho
+                             % quedaba enterrado en el ruido, solo la
+                             % respiración podía ser hallada
+cfg.rx_gain = 0;             % dB. Sin efecto en este binding, no aplica.
 cfg.rx_agc  = 'manual';
 
-% VERIFICADO en esta bladeRF: la escritura de ganancia RX no llega al
+% la escritura de ganancia RX no llega al
 % AD9361 aunque se lea de vuelta bien. Se comprobo tres veces, incluida
 % una con WiFi entrando a 0.4 de fondo de escala: el nivel no cambia al
 % mover rx_gain 72 dB. Por tanto el guardian estricto solo estorba aqui.
-% Si algun dia usas otra placa donde la ganancia SI responda, vuelve a
-% ponerlo en true.
+% Se deja en false si se trabaja con otro equipo
 cfg.strict_gain = false;
 cfg.gain_tol_db = 3;
 
 % Linea base con TX apagado
 cfg.baseline_blocks = 10;
 
-% Autocalibracion de nivel
-% Desactivada: el nivel ya se fijo a mano con calibrar_tx.m. Ademas el pico
-% |rx| esta dominado por el ruido propio del receptor (~0.027) y no responde
-% a la amplitud de TX, asi que la autocalibracion no puede converger: o
-% aborta, o empuja tx_amplitude hasta 0.5 y mete al amplificador en
-% compresion (verificado: a 0.40 el tono PIERDE 3.3 dB).
 cfg.autocal_enable = false;
 cfg.autocal_target_peak = 0.45;
 cfg.autocal_max_iter = 6;
 cfg.autocal_blocks = 5;
 
 cfg.block_len = 10000;
-% 15 s, no 60. La referencia (VitRad) graba 8 s. Una captura larga NO ayuda
-% aqui: la deriva entre los sintetizadores de TX y RX se acumula con el
-% tiempo (~0.06 vueltas de fase por segundo medidas en este equipo) y sube
-% la probabilidad de que el sujeto se mueva. Con 15 s la resolucion
-% espectral es de 4 bpm, que es la anchura real del pico cardiaco por la
-% variabilidad del ritmo: no se pierde nada util.
-cfg.capture_seconds = 44;
+cfg.capture_seconds = 30;
 cfg.num_blocks = ceil(cfg.capture_seconds * cfg.fs / cfg.block_len);
 cfg.capture_seconds = (cfg.block_len * cfg.num_blocks) / cfg.fs;
 cfg.num_buffers = 32;
@@ -117,7 +90,7 @@ fprintf('Iniciando RX %s y TX %s...\n', cfg.rx_channel, cfg.tx_channel);
 b.rx.start();
 b.tx.start();
 
-% Segundo intento de fijar la ganancia, ahora con el stream arrancado.
+% Octavo intento de fijar la ganancia, ahora con el stream arrancado.
 % En algunos bindings la escritura previa al start() no persiste.
 cfg = reafirmar_ganancia_rx(b, cfg);
 
@@ -132,7 +105,6 @@ end
 
 % =========================================================================
 % 2. LINEA BASE CON TX APAGADO
-%    Esto es lo que separa "mi fuga me satura" de "algo externo me satura".
 % =========================================================================
 fprintf('\n--- LINEA BASE (TX APAGADO) ---\n');
 [pk_off, rms_off] = medir_nivel(b, cfg, tx_zeros, cfg.baseline_blocks);
@@ -177,8 +149,7 @@ if cfg.autocal_enable
 
     amp_original = cfg.tx_amplitude;
 
-    % Prueba de respuesta: si dividir la amplitud entre 4 no mueve el pico,
-    % la saturacion no viene del TX y no tiene sentido seguir bajandola.
+
     [pk_a, ~] = medir_nivel(b, cfg, cfg.tx_amplitude * tone, 3);
     [pk_b, ~] = medir_nivel(b, cfg, (cfg.tx_amplitude/4) * tone, 3);
     cambio = abs(pk_a - pk_b) / max(pk_a, eps);
@@ -313,11 +284,6 @@ fprintf('\n========== BUFFER COMPLETO ==========\n');
 fprintf('I: min %.4f   max %.4f\n', min(real(rx_continuous)), max(real(rx_continuous)));
 fprintf('Q: min %.4f   max %.4f\n', min(imag(rx_continuous)), max(imag(rx_continuous)));
 
-% NOTA: NO se resta la media. Ese offset complejo es la fuga TX->RX + el
-% clutter estatico, o sea el centro del circulo IQ que necesita el
-% demodulador de fase aguas abajo. El unico DC que hay que quitar es el
-% del ADC a 0 Hz, y eso lo hace frontend_dsp.m antes de mezclar.
-
 cfg.overruns = total_overruns;
 cfg.saturation = porcentaje;
 cfg.actual_counts = actual_counts;
@@ -417,12 +383,11 @@ function cfg = configure_bladerf(b, cfg)
     fprintf('\n--- GANANCIAS ---\n');
     b.tx.gain = cfg.tx_gain;
     pause(0.05);
-    try, cfg.tx_gain_actual = b.tx.gain; catch, cfg.tx_gain_actual = NaN; end
+    try cfg.tx_gain_actual = b.tx.gain; catch, cfg.tx_gain_actual = NaN; end
 
-    % Escribir la ganancia RX y reintentar una vez si no cuaja.
     b.rx.gain = cfg.rx_gain;
     pause(0.1);
-    try, g = b.rx.gain; catch, g = NaN; end
+    try g = b.rx.gain; catch, g = NaN; end
     if isfinite(g) && abs(g - cfg.rx_gain) > cfg.gain_tol_db
         fprintf('Primer intento fallido (%.1f dB). Reintentando...\n', g);
         try
