@@ -1,15 +1,17 @@
 % =========================================================================
-% MASTER SCRIPT: RADAR DE SIGNOS VITALES  (v4)
+% MASTER SCRIPT: RADAR DE SIGNOS VITALES  (v7)
 % -------------------------------------------------------------------------
-% CAMBIOS v4:
-%  [1] Los filtros fisiologicos se disenan a Fs_frontend, que ahora vale
-%      ~100 Hz en vez de 4000 Hz. A 4 kHz, un paso-alto de 0.1 Hz tiene
-%      polos a radio 0.99992: mal condicionado y con transitorios larguisimos.
-%  [2] El bloque de diagnostico YA NO reimplementa la cadena de
-%      procesamiento. Grafica directamente las senales intermedias que
-%      devuelve procesar_signos_vitales_fixed en `info`, asi que las
-%      graficas y el resultado no pueden discrepar nunca.
-%  [3] Se anaden espectrograma de la fase y reporte de geometria IQ.
+% CAMBIOS v7:
+%  [1] Se cambia el espectro promediado por la mediana a espectro
+%      promediado por
+%      la media. Revisar
+%      línea 1122
+%      procesar_signos_vitales_fixed.m, se cambio la condicional solo por
+%      P = mean(Pmat, 2);
+%  [2] Se cambió el bloque de correción de desiquilibrio, ya que el propio
+%  chip contiene calibración I/Q
+%  [3] Se añadio código de
+%  inyección de una señal sintetica de 108 bpm para hacer pruebas
 % =========================================================================
 clear; clc; close all;
 

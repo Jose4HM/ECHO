@@ -168,21 +168,9 @@ if N < 20 * Fs
     warning('buffer_IQ tiene %.2f s de datos; BPM/RPM seran poco estables. Usa >=40 s.', N / Fs);
 end
 
-% --- Correccion de desequilibrio I/Q (Gram-Schmidt) -----------------------
-% IMPORTANTE: alpha y g se estiman sobre las versiones sin media (que es lo
-% correcto para medir correlacion y varianza), pero se APLICAN a la senal
-% CON su offset intacto. Ese offset es el centro del circulo y no se toca.
-I = real(buffer_IQ);
-Q = imag(buffer_IQ);
-Im = I - mean(I);
-Qm = Q - mean(Q);
-
-alpha = dot(Im, Qm) / (dot(Im, Im) + eps);
-Qm_o  = Qm - alpha * Im;
-g     = std(Im) / (std(Qm_o) + eps);
-
-S_iq = I + 1j * ((Q - alpha * I) * g);
-
+% --- ACONDICIONAMIENTO I/Q -----------------------------------------------
+% Gram-Schmidt DESACTIVADO.
+S_iq = buffer_IQ;
 % ================================================================
 % 1b. PORTADORA RESIDUAL (offset entre el LO de TX y el de RX)
 % ================================================================
@@ -233,6 +221,14 @@ info.center_offset_ratio = abs(c0) / (R0 + eps);
 Z = S_iq - c_t;             % <-- centrado CORRECTO (centro del circulo)
 
 phi_raw = unwrap(angle(Z));
+
+% % --- INYECCIÓN SINTÉTICA DE PRUEBA ---
+% % Creamos un eje de tiempo real para la señal
+% n_vec = (0:numel(phi_raw)-1).'; 
+% % Inyectamos una onda pura de 1.8 Hz (108 bpm) con amplitud de 0.05 rad
+% phi_raw = phi_raw + 0.05 * sin(2*pi*1.8 * n_vec / Fs); 
+% % ------------------------------------
+
 info.arc_span_rad = max(phi_raw) - min(phi_raw);
 
 fprintf('\n--- GEOMETRIA IQ ---\n');
@@ -442,7 +438,7 @@ end
 %
 % Si mides a alguien tras esfuerzo, o a un nino, sube este limite.
 hr_min_bpm = 55;
-hr_max_bpm = 105;
+hr_max_bpm = 130;
 fmin_hr = max(fmin_hr, hr_min_bpm/60);
 fmax_hr = hr_max_bpm/60;
 fprintf('Banda cardiaca de busqueda: %.0f-%.0f bpm (adulto en reposo).\n', ...
@@ -1118,9 +1114,5 @@ for i = 1:numel(inicios)
     Pmat(:, end+1) = Pi(:);   %#ok<AGROW>
 end
 
-if size(Pmat, 2) >= 3
-    P = median(Pmat, 2);
-else
-    P = mean(Pmat, 2);        % con 1 o 2 ventanas la mediana no aporta
-end
+P = mean(Pmat, 2);        % con 1 o 2 ventanas la mediana no aporta
 end
