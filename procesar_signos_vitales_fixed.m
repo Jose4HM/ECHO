@@ -57,10 +57,28 @@ info = struct( ...
     'rr_low_confidence', false, ...
     'rr_prominence', NaN, ...
     'rr_score_ratio', NaN, ...
+    'rr_candidate_rpm', NaN, ...
+    'rr_window_rpm', [], ...
+    'rr_window_prominence', [], ...
+    'rr_window_agreement', NaN, ...
+    'rr_amplitude_ratio', NaN, ...
+    'rr_consensus_prominence', NaN, ...
+    'rr_signal_rms_rad', NaN, ...
     'hr_fallback', false, ...
     'hr_low_confidence', false, ...
     'hr_prominence', NaN, ...
     'hr_score_ratio', NaN, ...
+    'hr_candidate_bpm', NaN, ...
+    'hr_spectral_bpm_raw', NaN, ...
+    'hr_spectral_bpm_fundamental', NaN, ...
+    'hr_subharmonic_ratio', NaN, ...
+    'hr_autocorr_bpm', NaN, ...
+    'hr_autocorr_peak', NaN, ...
+    'hr_folded_bpm', NaN, ...
+    'hr_folded_agreement', NaN, ...
+    'hr_folded_spread', NaN, ...
+    'hr_signal_rms_rad', NaN, ...
+    'hr_fusion_count', 0, ...
     'center_offset_ratio', NaN, ...
     'arc_span_rad', NaN, ...
     'circle_radius', NaN, ...
@@ -157,6 +175,7 @@ phi_use = phi_raw(keep);
 info.phi = phi_use(:);
 info.x = x(:);
 info.x_rr = x_rr(:);
+info.rr_signal_rms_rad = sqrt(mean((x_rr-median(x_rr)).^2));
 
 fprintf('Senal util: %.1f s (%d muestras a %.1f Hz)\n', numel(x)/Fs, numel(x), Fs);
 
@@ -177,12 +196,76 @@ if ~isfinite(f_rr_est) || f_rr_est < rr_min_hz || f_rr_est > rr_max_hz
     rpm_est = NaN;
     info.f_rr_est = NaN;
 else
-    rpm_est = double(60*f_rr_est);
+    f_rr_global = f_rr_est;
     info.f_rr_est = f_rr_est;
-    info.rr_low_confidence = rr_quality.prominence < 2.0 || rr_quality.score_ratio < 1.10;
+    info.rr_candidate_rpm = double(60*f_rr_est);
+
+    % Un pico global no demuestra respiracion: una sola joroba o un
+    % transitorio de borde tambien produce un pico estrecho. Exigir que la
+    % misma frecuencia reaparezca en varias ventanas y con amplitud
+    % razonablemente persistente durante toda la captura util.
+    [info.rr_window_rpm, info.rr_window_prominence, ...
+        info.rr_window_agreement, info.rr_amplitude_ratio, ...
+        f_rr_consensus, info.rr_consensus_prominence] = ...
+        consistencia_rr(x_rr, Fs, f_rr_est, rr_min_hz, rr_max_hz, pad_mult);
+
+    n_rr_win = numel(info.rr_window_rpm);
+    if isfinite(f_rr_consensus)
+        info.f_rr_est = f_rr_consensus;
+        info.rr_candidate_rpm = double(60*f_rr_consensus);
+    end
+
+    evidencia_global = rr_quality.prominence >= 2.0 && ...
+                       rr_quality.score_ratio >= 1.10 && ...
+                       abs(60*f_rr_global-info.rr_candidate_rpm) <= ...
+                           max(3.5, 0.18*info.rr_candidate_rpm);
+    evidencia_ventanas = info.rr_consensus_prominence >= 2.0;
+    acuerdo_rr_requerido = 0.75;
+    if n_rr_win == 3
+        acuerdo_rr_requerido = 2/3;
+    end
+    acuerdo_rr_ok = info.rr_window_agreement+eps >= acuerdo_rr_requerido;
+    % Dos salvaguardas dependientes de evidencia, no de una RR esperada:
+    % (1) una linea global muy dominante puede sobrevivir a una ventana
+    %     contaminada por movimiento;
+    % (2) por debajo de 8 rpm, una ventana de 12 s contiene menos de dos
+    %     ciclos y no puede votar de forma estable, por lo que manda la
+    %     captura completa si su pico y persistencia son fuertes.
+    evidencia_global_fuerte = rr_quality.prominence >= 3.0 && ...
+        rr_quality.score_ratio >= 1.50;
+    evidencia_rr_lenta = info.rr_candidate_rpm <= 8 && ...
+        rr_quality.prominence >= 3.0 && rr_quality.score_ratio >= 1.15 && ...
+        info.rr_amplitude_ratio >= 0.30;
+    decision_espectral_rr = (acuerdo_rr_ok && ...
+        (evidencia_global || evidencia_ventanas)) || ...
+        evidencia_global_fuerte || evidencia_rr_lenta;
+
+    info.rr_low_confidence = n_rr_win < 3 || ...
+                             info.rr_amplitude_ratio < 0.15 || ...
+                             info.rr_signal_rms_rad < 0.15 || ...
+                             ~decision_espectral_rr;
+
+    fprintf('\n--- CONSISTENCIA RR ---\n');
+    fprintf('RR por ventana (rpm): %s\n', formatear_lista(info.rr_window_rpm));
+    fprintf('Prominencia RR por ventana: %s\n', ...
+        formatear_lista(info.rr_window_prominence));
+    fprintf('Acuerdo con candidato (+-tolerancia): %.0f%%\n', ...
+        100*info.rr_window_agreement);
+    fprintf('Persistencia de amplitud min/max: %.2f\n', ...
+        info.rr_amplitude_ratio);
+    fprintf('Prominencia mediana del consenso: %.2f\n', ...
+        info.rr_consensus_prominence);
+    fprintf('RMS de fase respiratoria       : %.4f rad\n', ...
+        info.rr_signal_rms_rad);
     if info.rr_low_confidence
-        warning('RR %.1f rpm con baja confianza (prom %.2f, ratio %.2f).', ...
-            rpm_est, rr_quality.prominence, rr_quality.score_ratio);
+        rpm_est = NaN;
+        warning(['RR candidato %.1f rpm RECHAZADO por baja confianza ' ...
+            '(prom %.2f, ratio %.2f, acuerdo %.0f%%, persistencia %.2f).'], ...
+            info.rr_candidate_rpm, rr_quality.prominence, ...
+            rr_quality.score_ratio, 100*info.rr_window_agreement, ...
+            info.rr_amplitude_ratio);
+    else
+        rpm_est = info.rr_candidate_rpm;
     end
 end
 
@@ -205,17 +288,12 @@ info.f_hr_axis = f_hr_ax;
 info.P_hr = P_hr;
 
 mask_hr = (f_hr_ax >= hr_min_hz) & (f_hr_ax <= hr_max_hz);
-rr_for_hr = info.f_rr_est;
 
-% Solo se elimina de forma dura la zona de los armonicos bajos. Los
-% armonicos 4-6 se penalizan suavemente en el selector porque pueden caer
-% exactamente sobre un HR real (ej.: 15 rpm -> 5o armonico = 75 bpm).
-if isfinite(rr_for_hr)
-    delta = max(0.05, 0.10*rr_for_hr);
-    for h = 1:3
-        mask_hr = mask_hr & ~(abs(f_hr_ax - h*rr_for_hr) <= delta);
-    end
-end
+% La frecuencia cardiaca se selecciona de manera independiente de RR.
+% Penalizar candidatos cercanos a n*RR desplazo un HR real de 62.6 a
+% 74.0 bpm cuando RR era 20 rpm. La coincidencia con armonicos se usa mas
+% abajo para exigir mayor confianza, nunca para mover el pico candidato.
+rr_for_hr = NaN;
 
 [f_hr_est, hr_quality] = select_hr_peak_robust(f_hr_ax, P_hr, mask_hr, rr_for_hr);
 info.hr_prominence = hr_quality.prominence;
@@ -229,30 +307,193 @@ if ~isfinite(f_hr_est) || f_hr_est < hr_min_hz || f_hr_est > hr_max_hz
     return;
 end
 
-bpm_est = double(60*f_hr_est);
-info.f_hr_est = f_hr_est;
+% El maximo espectral cardiaco puede ser el segundo armonico del pulso.
+% No se fuerza ningun rango "esperado": se conserva el candidato bruto y
+% solo se pliega a f/2 cuando el propio espectro muestra soporte comparable
+% en el subarmonico. Esto permite distinguir 2*HR de una taquicardia real.
+hr_bpm_raw = double(60*f_hr_est);
+info.hr_spectral_bpm_raw = hr_bpm_raw;
+info.hr_subharmonic_ratio = soporte_subarmonico( ...
+    f_hr_ax, P_hr, f_hr_est/2, f_hr_est, 0.035);
 
-[info.hr_window_bpm, info.hr_agreement] = consistencia_hr( ...
-    x_hr, Fs, hr_win_s, hr_min_hz, hr_max_hz, bpm_est, rr_for_hr);
+hr_bpm_espectral = hr_bpm_raw;
+if f_hr_est/2 >= hr_min_hz && info.hr_subharmonic_ratio >= 0.80
+    hr_bpm_espectral = hr_bpm_raw/2;
+end
+info.hr_spectral_bpm_fundamental = hr_bpm_espectral;
 
+[info.hr_window_bpm, ~] = consistencia_hr( ...
+    x_hr, Fs, hr_win_s, hr_min_hz, hr_max_hz, hr_bpm_raw, rr_for_hr);
 n_hr_win = numel(info.hr_window_bpm);
-info.hr_low_confidence = hr_quality.prominence < 2.0 || ...
-                         hr_quality.score_ratio < 1.12 || ...
-                         n_hr_win < 3 || ...
-                         (isfinite(info.hr_agreement) && info.hr_agreement < 0.60);
+
+% Cada ventana aporta su pico y, si cabe en la banda, la hipotesis f/2.
+% Se usa un consenso de frecuencia; no se compara contra una referencia
+% clinica ni contra un rango adulto preferido.
+[info.hr_folded_bpm, info.hr_folded_agreement, ...
+    info.hr_folded_spread] = consenso_hr_con_armonicos( ...
+        info.hr_window_bpm, 60*hr_min_hz, 60*hr_max_hz);
+
+% Evidencia temporal independiente del espectro: el periodo dominante de
+% la autocorrelacion en la banda cardiaca.
+[info.hr_autocorr_bpm, info.hr_autocorr_peak] = ...
+    candidato_hr_autocorr(x_hr, Fs, 60*hr_min_hz, 60*hr_max_hz);
+
+% Fusion robusta de tres estimadores. Dos estimadores deben coincidir; el
+% consenso de ventanas solo puede decidir por si mismo si es estable. La
+% tolerancia de 7 bpm corresponde aproximadamente a la resolucion efectiva
+% de ventanas de 15-20 s, no a los valores reales de esta validacion.
+tol_fusion_bpm = 7;
+est = [hr_bpm_espectral, info.hr_autocorr_bpm, info.hr_folded_bpm];
+par_espectral_ac = cercanos(est(1), est(2), tol_fusion_bpm);
+par_espectral_ventanas = cercanos(est(1), est(3), tol_fusion_bpm) && ...
+    info.hr_folded_agreement >= 0.75 && info.hr_folded_spread <= 5;
+par_ac_ventanas = cercanos(est(2), est(3), tol_fusion_bpm) && ...
+    info.hr_folded_agreement >= 0.50 && info.hr_folded_spread <= 3 && ...
+    info.hr_autocorr_peak >= 0.22;
+
+usar = false(1,3);
+if par_espectral_ac, usar([1 2]) = true; end
+if par_espectral_ventanas, usar([1 3]) = true; end
+if par_ac_ventanas, usar([2 3]) = true; end
+usar = usar & isfinite(est);
+info.hr_fusion_count = nnz(usar);
+if any(usar)
+    hr_bpm_fusion = median(est(usar));
+else
+    hr_bpm_fusion = NaN;
+end
+
+% x_hr esta expresada en radianes de fase, por lo que este piso no depende
+% de la ganancia ADC. 0.01 rad equivale a unas decenas de micrometros de
+% desplazamiento ida-vuelta a 5.94 GHz y separa actividad fisiologica de
+% la fase residual observada apuntando al vacio.
+x_hr_c = x_hr - median(x_hr);
+info.hr_signal_rms_rad = sqrt(mean(x_hr_c.^2));
+
+presencia_hr = info.hr_signal_rms_rad >= 0.010;
+periodicidad_hr = info.hr_autocorr_peak >= 0.20;
+evidencia_espectral_hr = hr_quality.prominence >= 1.40;
+fusion_valida = isfinite(hr_bpm_fusion) && info.hr_fusion_count >= 2;
+
+info.hr_low_confidence = n_hr_win < 3 || ~presencia_hr || ...
+    ~periodicidad_hr || ~evidencia_espectral_hr || ~fusion_valida;
+
+if fusion_valida
+    info.hr_candidate_bpm = hr_bpm_fusion;
+    info.f_hr_est = hr_bpm_fusion/60;
+    info.hr_agreement = acuerdo_hr_con_armonicos( ...
+        info.hr_window_bpm, hr_bpm_fusion, 5);
+else
+    info.hr_candidate_bpm = hr_bpm_raw;
+    info.f_hr_est = f_hr_est;
+    info.hr_agreement = info.hr_folded_agreement;
+end
 
 fprintf('\n--- CONSISTENCIA HR ---\n');
 fprintf('HR por ventana (bpm): %s\n', formatear_lista(info.hr_window_bpm));
-if isfinite(info.hr_agreement)
-    fprintf('Acuerdo con global (+-5 bpm): %.0f%%\n', 100*info.hr_agreement);
+fprintf('HR espectral bruto/fundamental: %.1f / %.1f bpm\n', ...
+    info.hr_spectral_bpm_raw, info.hr_spectral_bpm_fundamental);
+fprintf('Soporte subarmonico f/2      : %.2f\n', info.hr_subharmonic_ratio);
+fprintf('HR por autocorrelacion       : %.1f bpm (pico %.2f)\n', ...
+    info.hr_autocorr_bpm, info.hr_autocorr_peak);
+fprintf('Consenso temporal plegado    : %.1f bpm (acuerdo %.0f%%, dispersion %.1f)\n', ...
+    info.hr_folded_bpm, 100*info.hr_folded_agreement, info.hr_folded_spread);
+fprintf('RMS de fase cardiaca         : %.4f rad\n', info.hr_signal_rms_rad);
+if fusion_valida
+    fprintf('Fusion HR (%d estimadores)    : %.1f bpm\n', ...
+        info.hr_fusion_count, hr_bpm_fusion);
 else
-    fprintf('Acuerdo con global: no evaluable (muy pocas ventanas)\n');
+    fprintf('Fusion HR                    : sin consenso\n');
+end
+if isfinite(info.hr_agreement)
+    fprintf('Acuerdo armonico con candidato (+-5 bpm): %.0f%%\n', ...
+        100*info.hr_agreement);
+else
+    fprintf('Acuerdo con candidato: no evaluable (muy pocas ventanas)\n');
 end
 
 if info.hr_low_confidence
-    warning(['HR %.1f bpm con baja confianza (prom %.2f, ratio %.2f, ' ...
-        '%d ventanas).'], bpm_est, hr_quality.prominence, ...
-        hr_quality.score_ratio, n_hr_win);
+    bpm_est = NaN;
+    warning(['HR candidato %.1f bpm RECHAZADO por baja confianza ' ...
+        '(prom %.2f, RMS %.4f rad, AC %.2f, fusion %d).'], ...
+        info.hr_candidate_bpm, hr_quality.prominence, ...
+        info.hr_signal_rms_rad, info.hr_autocorr_peak, ...
+        info.hr_fusion_count);
+else
+    bpm_est = hr_bpm_fusion;
+end
+end
+
+% =========================================================================
+% CONSISTENCIA RR
+% =========================================================================
+function [rpm_win, prom_win, acuerdo, amp_ratio, f_consenso, prom_consenso] = consistencia_rr( ...
+    x_rr, Fs, f_ref, fmin, fmax, pad_mult)
+x_rr = x_rr(:);
+N = numel(x_rr);
+dur_s = N/Fs;
+win_s = min(20, max(12, 0.40*dur_s));
+Nw = round(win_s*Fs);
+hop = max(1, round(Nw/2));
+rpm_win = [];
+prom_win = [];
+amp_ref = [];
+
+if Nw >= N
+    acuerdo = 0;
+    amp_ratio = 0;
+    f_consenso = NaN;
+    prom_consenso = 0;
+    return;
+end
+
+for i0 = 1:hop:(N-Nw+1)
+    seg = x_rr(i0:i0+Nw-1);
+    [f, P, bin_hz] = espectro(seg, Fs, pad_mult);
+    mask = (f >= fmin) & (f <= fmax);
+    [fw, qw] = select_rr_peak_robust(f, P, mask, bin_hz);
+    rpm_win(end+1,1) = 60*fw; %#ok<AGROW>
+    prom_win(end+1,1) = qw.prominence; %#ok<AGROW>
+
+    % Amplitud coherente exactamente en la frecuencia candidata global.
+    % Incluir constante y pendiente evita que una deriva local infle el tono.
+    t = (0:Nw-1).'/Fs;
+    A = [ones(Nw,1), t, sin(2*pi*f_ref*t), cos(2*pi*f_ref*t)];
+    q = A\seg;
+    amp_ref(end+1,1) = hypot(q(3),q(4));
+end
+
+% En ventanas cortas la prominencia cae aunque la respiracion sea real.
+% 1.2 solo habilita la votacion temporal; la aceptacion global conserva
+% los umbrales mas exigentes de prominencia y razon entre candidatos.
+validas = isfinite(rpm_win) & prom_win >= 1.2;
+
+% La mediana no favorece el intervalo de mayor amplitud: dos mitades con
+% respiracion visible a ambos lados del valor real deben combinarse, aunque
+% una mitad tenga mas energia por cambios de postura o distancia.
+if any(validas)
+    rpm_mediana = median(rpm_win(validas));
+    tol_rpm = max(3.5, 0.18*rpm_mediana);
+    mejor = validas & abs(rpm_win-rpm_mediana) <= tol_rpm;
+else
+    mejor = false(size(rpm_win));
+end
+
+acuerdo = nnz(mejor)/max(numel(rpm_win),1);
+if any(mejor)
+    rpm_consenso = median(rpm_win(mejor));
+    f_consenso = rpm_consenso/60;
+    prom_consenso = median(prom_win(mejor));
+else
+    f_consenso = NaN;
+    prom_consenso = 0;
+end
+
+amp_ref = amp_ref(isfinite(amp_ref) & amp_ref > 0);
+if isempty(amp_ref)
+    amp_ratio = 0;
+else
+    amp_ratio = min(amp_ref)/max(amp_ref);
 end
 end
 
@@ -337,13 +578,8 @@ for i0 = 1:hop:(N-Nw+1)
     [f, P, ~] = espectro(seg, Fs, 8);
     m = (f >= fmin) & (f <= fmax);
 
-    if isfinite(f_rr)
-        delta = max(0.05, 0.10*f_rr);
-        for h = 1:3
-            m = m & ~(abs(f-h*f_rr) <= delta);
-        end
-    end
-
+    % La consistencia usa el mismo criterio que la estimacion global:
+    % no borra armonicos respiratorios; los penaliza suavemente el selector.
     [f0, ~] = select_hr_peak_robust(f, P, m, f_rr);
     if isfinite(f0)
         bpm_win(end+1,1) = 60*f0; %#ok<AGROW>
@@ -355,6 +591,146 @@ if numel(bpm_win) < 2
 else
     acuerdo = mean(abs(bpm_win-bpm_ref) <= 5);
 end
+end
+
+function ratio = soporte_subarmonico(f, P, f_sub, f_full, half_width)
+% Relacion de amplitud entre un posible fundamental f/2 y el pico en f.
+if ~isfinite(f_sub) || ~isfinite(f_full) || f_sub <= 0 || f_full <= 0
+    ratio = 0;
+    return;
+end
+m_sub = abs(f-f_sub) <= half_width;
+m_full = abs(f-f_full) <= half_width;
+if ~any(m_sub) || ~any(m_full)
+    ratio = 0;
+    return;
+end
+ratio = max(P(m_sub))/(max(P(m_full))+eps);
+end
+
+function [bpm, pico] = candidato_hr_autocorr(x, Fs, bpm_min, bpm_max)
+% Periodo cardiaco por autocorrelacion normalizada. Solo se consideran
+% maximos locales para evitar seleccionar mecanicamente un borde de banda.
+x = x(:) - mean(x);
+if numel(x) < round(3*Fs) || sqrt(mean(x.^2)) <= eps
+    bpm = NaN;
+    pico = 0;
+    return;
+end
+r = xcorr(x, 'coeff');
+r = r(numel(x):end);
+i_lo = max(2, round(60/bpm_max*Fs)+1);
+i_hi = min(numel(r)-1, round(60/bpm_min*Fs)+1);
+if i_hi <= i_lo
+    bpm = NaN;
+    pico = 0;
+    return;
+end
+idx = i_lo:i_hi;
+loc = idx(r(idx) >= r(idx-1) & r(idx) >= r(idx+1));
+if isempty(loc)
+    [pico, k] = max(r(idx));
+    kk = idx(k);
+else
+    [pico, k] = max(r(loc));
+    kk = loc(k);
+end
+
+% Refinamiento parabolico en muestras de retardo.
+d = 0;
+if kk > 1 && kk < numel(r)
+    den = r(kk-1) - 2*r(kk) + r(kk+1);
+    if abs(den) > 1e-12
+        d = 0.5*(r(kk-1)-r(kk+1))/den;
+        d = max(-0.5,min(0.5,d));
+    end
+end
+lag = (kk-1)+d;
+bpm = 60*Fs/lag;
+end
+
+function [centro, acuerdo, dispersion] = consenso_hr_con_armonicos( ...
+    bpm_win, bpm_min, bpm_max)
+% Agrupa los picos temporales admitiendo que una ventana haya seleccionado
+% 2*HR. La hipotesis f/2 no reemplaza el dato: compite con el pico bruto.
+bpm_win = bpm_win(isfinite(bpm_win));
+if isempty(bpm_win)
+    centro = NaN;
+    acuerdo = NaN;
+    dispersion = Inf;
+    return;
+end
+
+opciones = [];
+for k = 1:numel(bpm_win)
+    if bpm_win(k) >= bpm_min && bpm_win(k) <= bpm_max
+        opciones(end+1,:) = [bpm_win(k), k]; %#ok<AGROW>
+    end
+    mitad = bpm_win(k)/2;
+    if mitad >= bpm_min && mitad <= bpm_max
+        opciones(end+1,:) = [mitad, k]; %#ok<AGROW>
+    end
+end
+if isempty(opciones)
+    centro = NaN;
+    acuerdo = 0;
+    dispersion = Inf;
+    return;
+end
+
+rejilla = bpm_min:0.25:bpm_max;
+cuentas = zeros(size(rejilla));
+for j = 1:numel(rejilla)
+    votos = false(1,numel(bpm_win));
+    for q = 1:size(opciones,1)
+        if abs(opciones(q,1)-rejilla(j)) <= 5
+            votos(opciones(q,2)) = true;
+        end
+    end
+    cuentas(j) = nnz(votos);
+end
+[n_votos, j] = max(cuentas);
+centro_previo = rejilla(j);
+
+elegidos = NaN(size(bpm_win));
+for k = 1:numel(bpm_win)
+    vals = bpm_win(k);
+    mitad = bpm_win(k)/2;
+    if mitad >= bpm_min && mitad <= bpm_max
+        vals = [vals, mitad]; %#ok<AGROW>
+    end
+    [dist, q] = min(abs(vals-centro_previo));
+    if dist <= 5
+        elegidos(k) = vals(q);
+    end
+end
+elegidos = elegidos(isfinite(elegidos));
+acuerdo = n_votos/max(numel(bpm_win),1);
+if isempty(elegidos)
+    centro = NaN;
+    dispersion = Inf;
+else
+    centro = median(elegidos);
+    dispersion = 1.4826*median(abs(elegidos-centro));
+end
+end
+
+function acuerdo = acuerdo_hr_con_armonicos(bpm_win, bpm_ref, tolerancia)
+bpm_win = bpm_win(isfinite(bpm_win));
+if isempty(bpm_win) || ~isfinite(bpm_ref)
+    acuerdo = NaN;
+    return;
+end
+ok = false(size(bpm_win));
+for k = 1:numel(bpm_win)
+    ok(k) = abs(bpm_win(k)-bpm_ref) <= tolerancia || ...
+        abs(bpm_win(k)/2-bpm_ref) <= tolerancia;
+end
+acuerdo = mean(ok);
+end
+
+function tf = cercanos(a, b, tolerancia)
+tf = isfinite(a) && isfinite(b) && abs(a-b) <= tolerancia;
 end
 
 % =========================================================================
@@ -399,7 +775,7 @@ for i = 1:numel(inicios)
     [f_ax, Pi, ~] = espectro(seg.*w, Fs, pad_mult, false);
     Pmat(:,end+1) = Pi(:); %#ok<AGROW>
 end
-P = mean(Pmat, 2);
+P = median(Pmat, 2);
 end
 
 % =========================================================================
@@ -428,16 +804,9 @@ for i = 1:numel(idx_peaks)
     nf = local_noise_floor(f_ax, P, f0, 0.12, 0.025, mask);
     prom = P(k)/(nf+eps);
 
-    edge_penalty = 1;
-    if f0 < 8/60
-        edge_penalty = 0.25;
-    elseif f0 < 10/60
-        edge_penalty = 0.55;
-    elseif f0 < 12/60
-        edge_penalty = 0.85;
-    end
-
-    scores(i) = prom*edge_penalty;
+    % Sin prior fisiologico: todos los candidatos dentro de 6-45 rpm
+    % compiten exclusivamente por evidencia espectral.
+    scores(i) = prom;
     proms(i) = prom;
     f_cands(i) = f0;
 end
@@ -467,7 +836,12 @@ end
 end
 
 function f_est = prefer_rr_fundamental(f_est, f_ax, P, mask, bin_hz)
-if ~isfinite(f_est) || f_est < 24/60
+% Comprobar tambien candidatos cercanos a 2*RR lento. Con solo 24 s utiles,
+% una respiracion de 6 rpm aporta unas 2.4 vueltas y el segundo armonico
+% puede dominar. El umbral inferior admite la incertidumbre de un bin en el
+% borde de 6 rpm; el pico final siempre se toma dentro de mask.
+if ~isfinite(f_est) || f_est < 10/60 || ...
+        (f_est >= 12/60 && f_est < 24/60)
     return;
 end
 
@@ -479,7 +853,7 @@ best_ratio = 0;
 
 for divisor = [2 3]
     f_candidate = f_est/divisor;
-    if f_candidate < 8/60 || f_candidate > 24/60
+    if f_candidate < 5.5/60 || f_candidate > 24/60
         continue;
     end
     if divisor == 3 && (f_est < 33/60 || f_candidate < 10/60)
@@ -547,16 +921,9 @@ for i = 1:numel(idx_peaks)
         end
     end
 
-    adult_bonus = 1;
-    if f0 >= 60/60 && f0 <= 130/60
-        adult_bonus = 1.15;
-    end
-
-    high_rate_penalty = 1;
-    if f0 > 130/60, high_rate_penalty = 0.70; end
-    if f0 > 150/60, high_rate_penalty = 0.55; end
-
-    scores(i) = prom*adult_bonus*high_rate_penalty/(1+harm_pen);
+    % Sin bonus por rango "adulto" ni penalizacion por frecuencia alta.
+    % Los armonicos respiratorios solo reciben una penalizacion SUAVE.
+    scores(i) = prom/(1+harm_pen);
     f_cands(i) = f0;
 end
 
@@ -653,7 +1020,12 @@ end
 % OFFSET RESIDUAL DE PORTADORA
 % =========================================================================
 function [z_out, f_off, vueltas, deriva_pp] = quitar_offset_portadora(z, Fs, fc_track)
-if nargin < 3 || isempty(fc_track), fc_track = 0.06; end
+% La correccion por defecto elimina solo el offset lineal TX/RX. Un
+% seguimiento paso-bajo de fase a 0.06 Hz tenia una constante temporal de
+% varios segundos y generaba una joroba artificial en los bordes, que el
+% detector confundia con respiracion. Se conserva fc_track solo para
+% diagnosticos offline explicitos.
+if nargin < 3 || isempty(fc_track), fc_track = 0; end
 
 N = numel(z);
 n = (0:N-1).';

@@ -33,6 +33,9 @@ cfg.gain_tol_db = 3;
 
 % Linea base con TX apagado
 cfg.baseline_blocks = 10;
+% Tiempo con el tono TX activo antes de guardar datos. Permite que la fase
+% RF/LO y la cola de streaming se estabilicen fuera de la captura util.
+cfg.tx_settle_seconds = 20;
 
 cfg.autocal_enable = false;
 cfg.autocal_target_peak = 0.45;
@@ -40,7 +43,7 @@ cfg.autocal_max_iter = 6;
 cfg.autocal_blocks = 5;
 
 cfg.block_len = 10000;
-cfg.capture_seconds = 30;
+cfg.capture_seconds = 60;
 cfg.num_blocks = ceil(cfg.capture_seconds * cfg.fs / cfg.block_len);
 cfg.capture_seconds = (cfg.block_len * cfg.num_blocks) / cfg.fs;
 cfg.num_buffers = 32;
@@ -90,7 +93,7 @@ b.rx.start();
 b.tx.start();
 
 % Reafirmar la ganancia despues de arrancar el stream.
-cfg = reafirmar_ganancia_rx(b, cfg);
+% cfg = reafirmar_ganancia_rx(b, cfg);
 
 fprintf('Limpiando buffers USB...\n');
 for k = 1:30
@@ -108,6 +111,28 @@ fprintf('\n--- LINEA BASE (TX APAGADO) ---\n');
 [pk_off, rms_off, pk_comp_off] = medir_nivel(b, cfg, tx_zeros, cfg.baseline_blocks);
 fprintf('Pico |IQ| sin TX: %.4f   pico componente I/Q: %.4f\n', pk_off, pk_comp_off);
 fprintf('RMS   sin TX: %.5f (%.1f dBFS)\n', rms_off, 20*log10(rms_off + 1e-12));
+
+% Al pasar de ceros al tono, la cola TX y la fase RF necesitan tiempo para
+% estabilizarse. Todo lo recibido aqui se descarta deliberadamente.
+fprintf('\n--- ESTABILIZACION TX ENCENDIDO (%.1f s) ---\n', cfg.tx_settle_seconds);
+n_settle = ceil(cfg.tx_settle_seconds * cfg.fs / cfg.block_len);
+settle_overruns = 0;
+settle_incomplete = 0;
+for k = 1:n_settle
+    b.transmit(tx_block, cfg.timeout_ms, 0, false, false);
+    [~, ~, nc_settle, ov_settle] = b.receive(cfg.block_len);
+    settle_overruns = settle_overruns + double(ov_settle ~= 0);
+    settle_incomplete = settle_incomplete + double(nc_settle ~= cfg.block_len);
+end
+cfg.tx_settle_actual_seconds = n_settle * cfg.block_len / cfg.fs;
+cfg.tx_settle_overruns = settle_overruns;
+cfg.tx_settle_incomplete_blocks = settle_incomplete;
+fprintf('Estabilizacion terminada: %.1f s, overruns %d, bloques incompletos %d.\n', ...
+    cfg.tx_settle_actual_seconds, settle_overruns, settle_incomplete);
+if settle_overruns > 0 || settle_incomplete > 0
+    warning(['Hubo incidencias durante la estabilizacion TX. No pertenecen a ' ...
+        'la captura util, pero conviene revisar el streaming.']);
+end
 
 [pk_on, rms_on, pk_comp_on] = medir_nivel(b, cfg, tx_block, cfg.baseline_blocks);
 fprintf('Pico |IQ| con TX: %.4f   pico componente I/Q: %.4f\n', pk_on, pk_comp_on);
@@ -202,6 +227,8 @@ fprintf('Calentamiento listo. Iniciando captura real...\n');
 % 4. CAPTURA
 % =========================================================================
 total_overruns = 0;
+fprintf('Indicador sonoro: comienza la captura util.\n');
+emitir_indicador_sonoro('inicio');
 fprintf('Capturando %d muestras de forma continua (%.1f s)...\n', ...
     total_samples, cfg.capture_seconds);
 
@@ -291,6 +318,7 @@ cfg.peak_global = pk_global;
 cfg.capture_valid = (total_overruns == 0) && (total_actual > 0);
 
 clear cleanup_obj;
+emitir_indicador_sonoro('fin');
 fprintf('Captura finalizada.\n');
 
 % =========================================================================
@@ -314,7 +342,7 @@ end
 
 function cfg = reafirmar_ganancia_rx(b, cfg)
     try
-        b.rx.gain = cfg.rx_gain;
+        % b.rx.gain = cfg.rx_gain;
         pause(0.1);
         g = b.rx.gain;
     catch
@@ -419,6 +447,36 @@ function cfg = configure_bladerf(b, cfg)
     b.rx.config.buffer_size = cfg.buffer_size;
     b.rx.config.num_transfers = cfg.num_transfers;
     b.rx.config.timeout_ms = cfg.timeout_ms;
+end
+
+function emitir_indicador_sonoro(tipo)
+    % Dos tonos breves: ascendentes al iniciar y descendentes al terminar.
+    % La pausa espera a que acabe el audio para no incluirlo en la captura.
+    try
+        fs_audio = 8000;
+        dur_tono = 0.12;
+        dur_pausa = 0.06;
+        t = (0:round(dur_tono*fs_audio)-1).' / fs_audio;
+        envolvente = 10*sin(pi*(0:numel(t)-1).' / max(numel(t)-1, 1)).^2;
+        silencio = zeros(round(dur_pausa*fs_audio), 1);
+
+        if strcmpi(tipo, 'inicio')
+            frecuencias = [700, 1000];
+        else
+            frecuencias = [1000, 700];
+        end
+
+        y = zeros(0,1);
+        for f = frecuencias
+            tono = envolvente .* sin(2*pi*f*t);
+            y = [y; tono; silencio]; %#ok<AGROW>
+        end
+
+        sound(y, fs_audio);
+        pause(numel(y)/fs_audio + 0.15);
+    catch ME
+        warning('No se pudo reproducir el indicador sonoro: %s', ME.message);
+    end
 end
 
 function cleanup_bladerf(b, cfg)

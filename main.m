@@ -59,7 +59,11 @@ dLP_rr = designfilt('lowpassiir', 'FilterOrder', 4, ...
 fprintf('\n=============================\n');
 fprintf('RESULTADOS\n');
 if vital_info.rr_fallback || ~isfinite(rpm)
-    fprintf('Respiracion: SIN DETECCION\n');
+    if isfield(vital_info,'rr_candidate_rpm') && isfinite(vital_info.rr_candidate_rpm)
+        fprintf('Respiracion: SIN DETECCION (candidato %.1f rpm rechazado)\n', vital_info.rr_candidate_rpm);
+    else
+        fprintf('Respiracion: SIN DETECCION\n');
+    end
 elseif vital_info.rr_low_confidence
     fprintf('Respiracion: %.1f rpm  [BAJA CONFIANZA]\n', rpm);
 else
@@ -67,7 +71,11 @@ else
 end
 
 if vital_info.hr_fallback || ~isfinite(bpm)
-    fprintf('Ritmo cardiaco: SIN DETECCION\n');
+    if isfield(vital_info,'hr_candidate_bpm') && isfinite(vital_info.hr_candidate_bpm)
+        fprintf('Ritmo cardiaco: SIN DETECCION (candidato %.1f bpm rechazado)\n', vital_info.hr_candidate_bpm);
+    else
+        fprintf('Ritmo cardiaco: SIN DETECCION\n');
+    end
 elseif vital_info.hr_low_confidence
     fprintf('Ritmo cardiaco: %.1f bpm  [BAJA CONFIANZA]\n', bpm);
 else
