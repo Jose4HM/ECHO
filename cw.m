@@ -9,6 +9,7 @@ cfg.serial = '8c14dec0ebc947b88424691d0dbf744f';
 cfg.fc = 5.94e9;             % Portadora (Hz). 5.8 GHz estaba inutilizable:
                              % el barrido de banda mostro WiFi saturando en
                              % 5.79 / 5.82 / 5.85 GHz (scan_banda.m)
+                             % 5.85GHz
 cfg.fs = 1e6;                % Tasa de muestreo (Sa/s)
 cfg.bandwidth = 1e6;         % Ancho de banda (Hz)
 cfg.tx_tone_hz = 100e3;      % Tono Low-IF para evitar ruido 1/f

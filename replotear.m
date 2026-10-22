@@ -1,4 +1,4 @@
-function [rpm, bpm, info] = replotear(archivo)
+    function [rpm, bpm, info] = replotear(archivo)
 %REPLOTEAR Reprocesa una captura .mat usando el pipeline actual.
 %
 % Uso:
