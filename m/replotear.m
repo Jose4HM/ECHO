@@ -107,6 +107,7 @@ end
 
 fprintf('=============================\n');
 
+
 % Regenerar exactamente el mismo diagnostico visual a partir de la captura.
 % La figura no interviene en los calculos: solo representa los resultados
 % que se acaban de obtener con el pipeline actual.

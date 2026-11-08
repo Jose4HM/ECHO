@@ -86,6 +86,9 @@ if isfinite(vital_info.hr_agreement)
     fprintf('Acuerdo HR entre ventanas: %.0f%%\n', 100*vital_info.hr_agreement);
 end
 fprintf('=============================\n');
+fprintf('HR final actual: %.4f bpm\n', bpm);
+fprintf('RR final actual: %.4f rpm\n', rpm);
+
 % 
 % plot_diagnostico_radar(rx_continuous, cfg, iq_frontend, Fs_frontend, ...
 %     rpm, bpm, vital_info);
