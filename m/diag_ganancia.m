@@ -92,12 +92,12 @@ for i = 1:numel(ganancias)
     fprintf('%7.1f %7.1f %10.5f %10.5f %8.4f %8.3f%%\n', ...
         g_ped, g_real, med, p99, pico, pct);
 
-    res.pedida(end+1,1)   = g_ped;   %#ok<AGROW>
-    res.real(end+1,1)     = g_real;  %#ok<AGROW>
-    res.mediana(end+1,1)  = med;     %#ok<AGROW>
-    res.p99(end+1,1)      = p99;     %#ok<AGROW>
-    res.pico(end+1,1)     = pico;    %#ok<AGROW>
-    res.pct_clip(end+1,1) = pct;     %#ok<AGROW>
+    res.pedida(end+1,1)   = g_ped;   
+    res.real(end+1,1)     = g_real;  
+    res.mediana(end+1,1)  = med;     
+    res.p99(end+1,1)      = p99;     
+    res.pico(end+1,1)     = pico;    
+    res.pct_clip(end+1,1) = pct;     
 end
 
 % ---------------------------------------------------------------------

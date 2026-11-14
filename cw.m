@@ -21,14 +21,11 @@ cfg.tx_gain = 65;            % dB. El TX es el UNICO mando de nivel util en
                              % esta placa. A -24 dB el eco del pecho
                              % quedaba enterrado en el ruido, solo la
                              % respiración podía ser hallada
-cfg.rx_gain = 0;             % dB. Sin efecto en este binding, no aplica.
+cfg.rx_gain = 60;             % Ganancia global RX en dB.
 cfg.rx_agc  = 'manual';
-
-% la escritura de ganancia RX no llega al
-% AD9361 aunque se lea de vuelta bien. Se comprobo tres veces, incluida
-% una con WiFi entrando a 0.4 de fondo de escala: el nivel no cambia al
-% mover rx_gain 72 dB. Por tanto el guardian estricto solo estorba aqui.
-% Poner true solo si el binding aplica la ganancia RX de forma fiable.
+    
+% La ganancia RX se aplica despues de habilitar el modulo receptor.
+% La verificacion se realiza con el canal RX activo.
 cfg.strict_gain = false;
 cfg.gain_tol_db = 3;
 
@@ -90,9 +87,26 @@ fprintf('Esperando bloqueo inicial de sintetizadores a %.3f GHz...\n', cfg.fc/1e
 pause(1.0);
 
 fprintf('Iniciando RX %s y TX %s...\n', cfg.rx_channel, cfg.tx_channel);
-b.rx.start();
-b.tx.start();
 
+% 1. Habilitar receptor
+b.rx.start();
+
+% 2. Aplicar ganancia con RX habilitado
+b.rx.gain = cfg.rx_gain;
+pause(0.1);
+
+% 3. Leer ganancia efectiva
+cfg.rx_gain_actual = double(b.rx.gain);
+
+fprintf('\n--- VERIFICACION GANANCIA RX ---\n');
+fprintf('Solicitada: %.1f dB\n', cfg.rx_gain);
+fprintf('Aplicada:   %.1f dB\n', cfg.rx_gain_actual);
+
+% 4. Verificar resultado
+verificar_ganancia_rx(cfg);
+
+% 5. Iniciar transmisor
+b.tx.start();
 % Reafirmar la ganancia despues de arrancar el stream.
 % cfg = reafirmar_ganancia_rx(b, cfg);
 
@@ -366,11 +380,10 @@ function verificar_ganancia_rx(cfg)
         return;
     end
     msg = sprintf([ ...
-        'La ganancia RX NO se aplico: pediste %.1f dB y el hardware reporta ' ...
-        '%.1f dB.\nEso no es un recorte a rango, es que la escritura no tomo ' ...
-        'efecto.\nCausa mas probable: el AGC sigue activo, o el binding usa ' ...
-        'otro nombre de propiedad.\nCorre  diag_ganancia(''%s'')  para ver que ' ...
-        'expone tu version.'], cfg.rx_gain, cfg.rx_gain_actual, cfg.serial);
+        'La ganancia RX solicitada fue %.1f dB, pero el hardware ' ...
+        'reporta %.1f dB despues de habilitar RX.\n' ...
+        'Verifique el modo AGC, el rango de ganancia y la respuesta del hardware.'], ...
+        cfg.rx_gain, cfg.rx_gain_actual);
     if cfg.strict_gain
         error('%s\n\n(Para capturar igualmente, pon cfg.strict_gain = false.)', msg);
     else
@@ -389,22 +402,16 @@ function cfg = configure_bladerf(b, cfg)
     b.rx.bandwidth = cfg.bandwidth;
 
     fprintf('\n--- MODO DE GANANCIA RX ---\n');
-    modo_puesto = '';
-    for nombre = {'agc', 'gain_mode'}
-        campo = nombre{1};
-        try
-            b.rx.(campo) = cfg.rx_agc;
-            leido = b.rx.(campo);
-            fprintf('b.rx.%-10s = ''%s'' -> lee ''%s''\n', campo, cfg.rx_agc, string(leido));
-            modo_puesto = campo;
-        catch
-            fprintf('b.rx.%-10s no disponible en este binding\n', campo);
-        end
-    end
-    cfg.rx_gain_mode_prop = modo_puesto;
-    if isempty(modo_puesto)
-        warning(['No se pudo fijar el modo de ganancia manual. Si el AGC ' ...
-            'queda activo, cfg.rx_gain no tendra ningun efecto.']);
+
+    b.rx.agc = cfg.rx_agc;
+
+    modo_leido = b.rx.agc;
+
+    fprintf('AGC RX solicitado: %s | leido: %s\n', ...
+        cfg.rx_agc, string(modo_leido));
+
+    if ~strcmpi(string(modo_leido), string(cfg.rx_agc))
+        error('No se pudo establecer el modo AGC manual.');
     end
 
     fprintf('\n--- GANANCIAS ---\n');
@@ -412,32 +419,19 @@ function cfg = configure_bladerf(b, cfg)
     pause(0.05);
     try cfg.tx_gain_actual = b.tx.gain; catch, cfg.tx_gain_actual = NaN; end
 
-    b.rx.gain = cfg.rx_gain;
-    pause(0.1);
-    try g = b.rx.gain; catch, g = NaN; end
-    if isfinite(g) && abs(g - cfg.rx_gain) > cfg.gain_tol_db
-        fprintf('Primer intento fallido (%.1f dB). Reintentando...\n', g);
-        try
-            if ~isempty(modo_puesto)
-                b.rx.(modo_puesto) = cfg.rx_agc;
-            end
-            pause(0.1);
-            b.rx.gain = cfg.rx_gain;
-            pause(0.1);
-            g = b.rx.gain;
-        catch
-        end
-    end
-    cfg.rx_gain_actual = g;
 
-    fprintf('TX solicitado %.2f dB -> real %.2f dB\n', cfg.tx_gain, cfg.tx_gain_actual);
-    fprintf('RX solicitado %.2f dB -> real %.2f dB\n', cfg.rx_gain, cfg.rx_gain_actual);
+    fprintf('TX solicitado %.2f dB -> real %.2f dB\n', ...
+        cfg.tx_gain, cfg.tx_gain_actual);
+
+    fprintf('RX solicitado %.2f dB -> se aplicara al habilitar RX\n', ...
+        cfg.rx_gain);
+
     if isfinite(cfg.tx_gain_actual) && abs(cfg.tx_gain_actual - cfg.tx_gain) > 0.5
         warning(['La ganancia TX quedo en %.2f dB en vez de %.2f dB. Usa ' ...
             'cfg.tx_amplitude para ajustar el nivel en el dominio digital.'], ...
             cfg.tx_gain_actual, cfg.tx_gain);
     end
-    verificar_ganancia_rx(cfg);
+
     fprintf('-----------------\n');
 
     b.tx.config.num_buffers = cfg.num_buffers;
