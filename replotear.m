@@ -1,4 +1,4 @@
-    function [rpm, bpm, info] = replotear(archivo)
+function [rpm, bpm, info] = replotear(archivo, mostrar_figura)
 %REPLOTEAR Reprocesa una captura .mat usando el pipeline actual.
 %
 % Uso:
@@ -41,7 +41,7 @@ fprintf('========================================\n');
 % ---------------------------------------------------------
 fprintf('\nEjecutando front-end DSP...\n');
 
-[iq, Fs] = frontend_dsp(rx, cfg);
+[iq, Fs, front_info] = frontend_dsp(rx, cfg);
 
 % ---------------------------------------------------------
 % 3. FILTROS FISIOLOGICOS ACTUALES
@@ -63,9 +63,15 @@ fprintf('Filtro fisiologico: HP %.2f Hz.\n',fc_hp);
 % ---------------------------------------------------------
 % 4. PROCESAMIENTO ACTUAL
 % ---------------------------------------------------------
-[rpm,bpm,info] = procesar_signos_vitales_fixed( ...
+[rpm,bpm,info] = processing_vital_signs( ...
     iq, Fs, dHP, dLP_rr);
-
+% Incorporar diagnosticos del frontend
+info.lowif_nominal_hz = front_info.nominal_hz;
+info.lowif_measured_hz = front_info.measured_hz;
+info.lowif_offset_hz = front_info.offset_hz;
+info.lowif_contrast_db = front_info.contrast_db;
+info.lowif_exceeded_2khz = front_info.exceeded_2khz;
+info.lowif_mix_frequency_hz = front_info.mix_frequency_hz;
 % ---------------------------------------------------------
 % 5. RESULTADOS
 % ---------------------------------------------------------
@@ -111,6 +117,8 @@ fprintf('=============================\n');
 % Regenerar exactamente el mismo diagnostico visual a partir de la captura.
 % La figura no interviene en los calculos: solo representa los resultados
 % que se acaban de obtener con el pipeline actual.
-plot_diagnostico_radar(rx, cfg, iq, Fs, rpm, bpm, info);
+if mostrar_figura
+    plot_diagnostico_radar(rx, cfg, iq, Fs, rpm, bpm, info);
+end
 
 end

@@ -1,4 +1,3 @@
-
 %% ECHO - Comparacion de algoritmos (muestras estandar)
 clear; clc;
 
